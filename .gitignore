@@ -1,0 +1,10 @@
+*.pyc
+*.inp
+*.png
+*.txt
+*.12d
+*.cvg
+*.dat
+*.frd
+*.sta
+venv/
