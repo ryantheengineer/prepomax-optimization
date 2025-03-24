@@ -9,20 +9,18 @@ from C_getResultsFromFRD import get_node_deformations as getNodeDef
 from scipy.optimize import minimize_scalar
 
 
-def objective_fun(thickness, base_file_path, resultsDirectory, ccx_executable, number_of_cores, deformationLimit):
-    global thicknessHistory
+def objective_fun(stiffness, base_file_path, resultsDirectory, ccx_executable, number_of_cores, deformationLimit):
+    global stiffnessHistory
     global defHistory
     
     #INP Generator Initialization
     inpGeneratorClass = INPFileGenerator(base_file_path, resultsDirectory, ccx_executable, number_of_cores)
     
-    currentThicknesses = [str(float(thickness)) for i in range(7)]
-    thicknessHistory.append(float(currentThicknesses[0]))
+    currentStiffness = [str(float(stiffness))]
+    stiffnessHistory.append(float(currentStiffness[0]))
     
-    file_name = inpGeneratorClass.generate_new_inp_file(new_values = currentThicknesses, file_index = len(defHistory))
+    file_name = inpGeneratorClass.generate_new_inp_file(new_value = currentStiffness, file_index = len(defHistory))
     print(f">> File Generated: {file_name}")
-    
-    # deformationLimit = 2  # Deformation limit in mm
         
     calculix_runner = CalculiXRunner(resultsDirectory, ccx_executable, [file_name], number_of_cores)
     calculix_runner.run()
@@ -39,7 +37,7 @@ base_file_path = r'C:\Users\Ryan.Larson.ROCKWELLINC\github\prepomax-optimization
 # base_file_path = r'simpleShellThicknessOpt\02_baseModelFile\shell_7_parts_base_static.inp'
 resultsDirectory = r'C:\Users\Ryan.Larson.ROCKWELLINC\github\prepomax-optimization\materialOpt\03_results'
 # resultsDirectory = r'materialOpt\03_results'
-ccx_executable = r'E:\\Downloads\\PrePoMax v2.2.0\\PrePoMax v2.2.0\\Solver\\ccx_dynamic.exe'
+ccx_executable = r'E:\Downloads\PrePoMax v2.2.0\PrePoMax v2.2.0\Solver\ccx_dynamic.exe'
 # ccx_executable = r'C:\\Users\\CalculiX\\bin\\ccx\\ccx213.exe'
 number_of_cores = 4
 
@@ -47,7 +45,7 @@ number_of_cores = 4
 # thicknessStarter = ['1', '1', '1', '1', '1', '1', '1']
 # currentThicknesses = thicknessStarter
 # defHistory = []
-# thicknessHistory = []
+# stiffnessHistory = []
 
 # #increments and Step Sizes
 # increment_step = .5  # Define how much to increment each thickness value
@@ -63,7 +61,7 @@ number_of_cores = 4
 #     currentThicknesses = [str(float(currentThicknesses[i]) + increment_step) for i in range(7)]
 #     file_name = inpGeneratorClass.generate_new_inp_file(new_values = currentThicknesses, file_index = len(defHistory))
 #     print(f">> File Generated: {file_name}")
-#     thicknessHistory.append(float(currentThicknesses[0]))
+#     stiffnessHistory.append(float(currentThicknesses[0]))
 #     calculix_runner = CalculiXRunner(resultsDirectory, ccx_executable, [file_name], number_of_cores)
 #     calculix_runner.run()
 #     print(f">> CalculiX Run Completed for {file_name}")
@@ -79,11 +77,11 @@ number_of_cores = 4
 
 
 defHistory = []
-thicknessHistory = []
-deformationLimit = 10
+stiffnessHistory = []
+deformationLimit = 5
 
 result = minimize_scalar(objective_fun,
-                         bounds=(1e-10, 10),
+                         bounds=(1e-10, 1000000),
                          method='bounded',
                          args=(base_file_path,
                                resultsDirectory,
@@ -94,13 +92,13 @@ result = minimize_scalar(objective_fun,
 
 #RESULTING THICKNESS AND DEFORMATION
 print('\n\n>> All CalculiX runs completed successfully!\n' + 
-      f">> Final Thickness:\t{thicknessHistory[-1]}\n" + 
+      f">> Final Stiffness:\t{stiffnessHistory[-1]}\n" + 
       f">> Final Deformation:\t{defHistory[-1]}\n")
 
 
 #PLOT
 fig, ax1 = plt.subplots()
-final_thickness = thicknessHistory[-1]
+final_stiffness = stiffnessHistory[-1]
 final_deformation = defHistory[-1]
 
 ax1.annotate(f'Final Deformation: {final_deformation:.2f}', xy=(len(defHistory)-1, final_deformation), 
@@ -110,8 +108,8 @@ ax1.annotate(f'Final Deformation: {final_deformation:.2f}', xy=(len(defHistory)-
 
 ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
 
-ax2.annotate(f'Final Thickness: {final_thickness:.2f}', xy=(len(thicknessHistory)-1, final_thickness), 
-             xytext=(len(thicknessHistory)-1, final_thickness + 0.5),
+ax2.annotate(f'Final Stiffness: {final_stiffness:.2f}', xy=(len(stiffnessHistory)-1, final_stiffness), 
+             xytext=(len(stiffnessHistory)-1, final_stiffness + 0.5),
              arrowprops=dict(facecolor='red', shrink=0.05),
              fontsize=10, color='red')
 color = 'blue'
@@ -123,13 +121,13 @@ ax1.tick_params(axis='y', labelcolor=color)
 
 color = 'red'
 ax2.set_ylabel('Thickness', color=color)
-ax2.plot(thicknessHistory, color=color)
+ax2.plot(stiffnessHistory, color=color)
 ax2.tick_params(axis='y', labelcolor=color)
 ax2.set_ylabel('Thickness', color=color)
 ax1.axhline(y=deformationLimit, color='lightgreen', linestyle='--', label=f'Deformation Limit: {deformationLimit}')
 ax1.text(len(defHistory)*.3, deformationLimit*2, f'Deformation Limit: {deformationLimit} [mm]', fontsize=10, color='lightgreen')
 ax1.legend()
-ax2.plot(thicknessHistory, color=color)
+ax2.plot(stiffnessHistory, color=color)
 
 fig.tight_layout()  # to ensure the right y-label is not slightly clipped
 plot_path = os.path.join(resultsDirectory, 'AAA_thickness_optimization_plot.png')

@@ -10,7 +10,8 @@ from C_getResultsFromFRD import get_node_deformations as getNodeDef
 #init parameters
 base_file_path = r'C:\Users\Ryan.Larson.ROCKWELLINC\github\prepomax-optimization\simpleShellThicknessOpt\02_baseModelFile\shell_7_parts_base_static.inp'
 # base_file_path = r'simpleShellThicknessOpt\02_baseModelFile\shell_7_parts_base_static.inp'
-resultsDirectory = r'simpleShellThicknessOpt\03_results'
+resultsDirectory = r'C:\Users\Ryan.Larson.ROCKWELLINC\github\prepomax-optimization\simpleShellThicknessOpt\03_results'
+# resultsDirectory = r'simpleShellThicknessOpt\03_results'
 ccx_executable = r'E:\\Downloads\\PrePoMax v2.2.0\\PrePoMax v2.2.0\\Solver\\ccx_dynamic.exe'
 # ccx_executable = r'C:\\Users\\CalculiX\\bin\\ccx\\ccx213.exe'
 number_of_cores = 4
