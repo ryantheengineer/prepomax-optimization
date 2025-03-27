@@ -1,5 +1,4 @@
 #libs
-import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -40,40 +39,6 @@ resultsDirectory = r'C:\Users\Ryan.Larson.ROCKWELLINC\github\prepomax-optimizati
 ccx_executable = r'E:\Downloads\PrePoMax v2.2.0\PrePoMax v2.2.0\Solver\ccx_dynamic.exe'
 # ccx_executable = r'C:\\Users\\CalculiX\\bin\\ccx\\ccx213.exe'
 number_of_cores = 4
-
-# #thickness starters
-# thicknessStarter = ['1', '1', '1', '1', '1', '1', '1']
-# currentThicknesses = thicknessStarter
-# defHistory = []
-# stiffnessHistory = []
-
-# #increments and Step Sizes
-# increment_step = .5  # Define how much to increment each thickness value
-# maxIterations = 100  # Number of iterations
-# deformationLimit = 2  # Deformation limit in mm
-# maxDef = deformationLimit + 1   # just for initialization of while loop > deformationLimit
-
-# #INP Generator Initialization
-# inpGeneratorClass = INPFileGenerator(base_file_path, resultsDirectory, ccx_executable, number_of_cores)
-
-# #OPTIMIZATION LOOP
-# while maxDef > deformationLimit and len(defHistory) < maxIterations:
-#     currentThicknesses = [str(float(currentThicknesses[i]) + increment_step) for i in range(7)]
-#     file_name = inpGeneratorClass.generate_new_inp_file(new_values = currentThicknesses, file_index = len(defHistory))
-#     print(f">> File Generated: {file_name}")
-#     stiffnessHistory.append(float(currentThicknesses[0]))
-#     calculix_runner = CalculiXRunner(resultsDirectory, ccx_executable, [file_name], number_of_cores)
-#     calculix_runner.run()
-#     print(f">> CalculiX Run Completed for {file_name}")
-
-#     frd_path = resultsDirectory + '\\' + file_name + '.frd'
-#     maxDef = getNodeDef(frd_path)['dy'].max()
-#     defHistory.append(maxDef)
-#     print("\n**************************************")
-#     print(f">> Maximum dy deformation for {file_name}")
-#     print("--------------------------------------")
-#     print(f">> dyMax = {maxDef}")
-#     print("**************************************")
 
 
 defHistory = []
