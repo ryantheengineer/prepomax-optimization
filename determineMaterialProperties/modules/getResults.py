@@ -11,7 +11,7 @@ frd_file_path = "dummy.frd"
 dat_file_path = "dummy.dat"
 
 
-def get_contact_force_z(dat_file):
+def get_contact_force(dat_file):
     """
     Retrieve the contact forces from all steps in the .dat file. Assumes
     contact forces are present, that only one contact pair is selected, and
