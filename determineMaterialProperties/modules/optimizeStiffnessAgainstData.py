@@ -35,7 +35,10 @@ def objective_fun(modulus, params):
     disp_pmx_file = params['disp_pmx_file']
     geo_source_file = params['geo_source_file'] # Geometry source file (original geometry file the .pmx file was created with)
     geo_target_file = params['geo_target_file'] # Geometry target file (new geometry file the .pmx file will be regenerated with)
+    
+    # Simulation parameters
     number_of_cores = params['number_of_cores']
+    
     
     
     # global stiffnessHistory
@@ -48,15 +51,16 @@ def objective_fun(modulus, params):
                                              pmx_file=preload_pmx_file,
                                              geo_source_file=geo_source_file,
                                              geo_target_file=geo_target_file,
-                                             params=["modulus={modulus}; poisson={poisson}"],
+                                             params=f'["modulus={modulus}; poisson={poisson}"]',
                                              number_of_cores=number_of_cores)
     calculix_runner_preload.regenerate_run()
     
     # Get the Z displacement from the preload and solve for the total required
     # displacement. This will be the minimum value since the load is in the
     # negative Z direction.
-    frd_file = os.basename(preload_pmx_file)
-    frd_path = os.path.join(results_directory, frd_file + ".frd")
+    frd_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
+    frd_path = results_directory + '/' + frd_file + ".frd"
+    # frd_path = os.path.join(results_directory, frd_file + ".frd")
     minDef = getNodeDef(frd_path)['dz'].min()
     
     total_displacement = np.abs(minDef) + np.abs(displacement) # Assumes the displacement is defined as a positive value but used as a negative value in the simulation
@@ -66,13 +70,15 @@ def objective_fun(modulus, params):
                                                   pmx_file=disp_pmx_file,
                                                   geo_source_file=geo_source_file,
                                                   geo_target_file=geo_target_file,
-                                                  params=["modulus={modulus}; poisson={poisson}; displacement={total_displacement}"],
+                                                  params=f'["modulus={modulus}; poisson={poisson}; displacement={total_displacement}"]',
                                                   number_of_cores=number_of_cores)
     
     # Get the contact force from the .dat file
     displacement_file = os.basename(disp_pmx_file)
     dat_path = results_directory + '\\' + displacement_file + '.dat'    # Try this with a path library or os
     CFZ = get_contact_force(dat_path)['FZ']
+    
+    return CFZ
     
     # Use CFZ and displacement to run regression and get the stiffness
     

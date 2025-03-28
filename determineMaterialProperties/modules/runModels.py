@@ -27,22 +27,29 @@ class CalculiXRunner:
         
         tStart = time.time()
         
+        env = os.environ.copy()
+        env["TMP"] = self.working_directory
+        env["TEMP"] = self.working_directory
+        
         if self.params:
             command = [self.ccx_executable,
-                       "-r", self.pmx_file,
                        "-p", self.params,
+                       "-r", self.pmx_file,
+                       "-g", "No",
+                       "-w", self.working_directory,
                        "-t", str(self.number_of_cores),
-                       "-w", self.working_directory
                        ]
         else:
             command = [self.ccx_executable,
                        "-r", self.pmx_file,
+                       "-g", "No",
+                       "-w", self.working_directory,
                        "-t", str(self.number_of_cores),
-                       "-w", self.working_directory
                        ]
         
         try:
             result = subprocess.run(command, cwd=self.working_directory, check=True, capture_output=True, text=True)
+            # result = subprocess.run(command, cwd=self.working_directory, check=True, capture_output=True, text=True)
             print(f">> CalculiX ran successfully for {self.pmx_file}!")
             # print(">> Output:")
             # print(result.stdout)  # CalculiX standard output
@@ -50,36 +57,46 @@ class CalculiXRunner:
             # print(result.stderr)  # CalculiX error output
         except subprocess.CalledProcessError as e:
             print(f">> Error while running CalculiX for {self.pmx_file}:")
-            print(e.stderr)
+            print(f"Result:\t{e.stdout}")
+            # print(e.stderr)
             
         deltaTime = time.time() - tStart
         print(f"Elapsed time:\t{deltaTime} [s]")
     
-    def rename_basename(self, file_path, new_basename):
-        """Renames the basename of a file path.
+    # def rename_basename(self, file_path, new_basename):
+    #     """Renames the basename of a file path.
         
-        Args:
-          file_path: The original file path.
-          new_basename: The new basename for the file.
-        """
-        dirname = os.path.dirname(file_path)
-        new_path = os.path.join(dirname, new_basename)
-        os.rename(file_path, new_path)
+    #     Args:
+    #       file_path: The original file path.
+    #       new_basename: The new basename for the file.
+    #     """
+    #     dirname = os.path.dirname(file_path)
+    #     new_path = os.path.join(dirname, new_basename)
+    #     os.rename(file_path, new_path)
     
-    def copy_and_rename(self, src_file, dest_file, new_name):        
-        # Copy the file to the new location (overwrites the existing file)
-        shutil.copy(src_file, dest_file)
+    # def copy_and_rename(self, selected_geometry_file, base_geometry_file):        
+    #     ### Replace base_geometry.stl with the chosen file
+    #     # Copy the selected_geometry_file
+    #     shutil.copy(selected_geometry_)
+        
+    #     # Copy the file to the new location (overwrites the existing file)
+    #     shutil.copy(src_file, dest_file)
     
-    	# Rename the copied file
-        self.rename_basename(dest_file, new_name)
+    # 	# Rename the copied file
+    #     self.rename_basename(dest_file, new_name)
     
     def regenerate_run(self):
         if self.pmx_file is None or self.geo_source_file is None or self.geo_target_file is None:
             raise Exception("Missing .pmx file or geometry source or target file")
-            
-        # Copy and rename the geo_source_file so it replaces geo_target_file
-        self.copy_and_rename(src_file=self.geo_source_file,
-                        dest_file=self.geo_target_file,
-                        new_name=os.basename(self.geo_source_file))
+        
+        # Copy replacement geometry STL file to the base geometry file's
+        # location and rename to match the base geometry's name (overwrites
+        # the original)
+        shutil.copy(self.geo_target_file, self.geo_source_file)
+        
+        # # Copy and rename the geo_source_file so it replaces geo_target_file
+        # self.copy_and_rename(src_file=self.geo_source_file,
+        #                 dest_file=self.geo_target_file,
+        #                 new_name=os.path.basename(self.geo_source_file))
         
         self.run()

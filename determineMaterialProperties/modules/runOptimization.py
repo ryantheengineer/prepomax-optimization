@@ -9,6 +9,7 @@ import yaml
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import optimizeStiffnessAgainstData as opt
 
 # YAML file path
 YAML_FILE = "config.yaml"
@@ -134,7 +135,7 @@ class ParameterGUI:
         update_btn = tk.Button(self.root, text="Update Values", command=self.update_values, width=15)
         update_btn.grid(row=len(PARAMETERS) + 1, column=0, pady=10, padx=10)
 
-        save_btn = tk.Button(self.root, text="Accept & Save", command=self.validate_and_save, width=15, bg="green", fg="white")
+        save_btn = tk.Button(self.root, text="Accept & Run", command=self.validate_and_save, width=15, bg="green", fg="white")
         save_btn.grid(row=len(PARAMETERS) + 1, column=3, pady=10, padx=10)
 
     def select_file(self, param, label):
@@ -189,7 +190,7 @@ class ParameterGUI:
         #         return
 
         save_yaml(self.data)
-        messagebox.showinfo("Success", "Configuration saved!")
+        # messagebox.showinfo("Success", "Configuration saved!")
         self.root.destroy()  # Close the GUI
 
 # Run GUI
@@ -198,4 +199,8 @@ if __name__ == "__main__":
     app = ParameterGUI(root)
     root.mainloop()
 
-    updated_data = load_yaml()
+    params = load_yaml()
+    
+    modulus = 2000.0
+    CFZ = opt.objective_fun(modulus, params)
+    
