@@ -46,6 +46,7 @@ def objective_fun(modulus, params):
     
     
     # Set up and run first .pmx file (preload only)
+    print("Running preload simulation...\n")
     calculix_runner_preload = CalculiXRunner(results_directory,
                                              ccx_executable,
                                              pmx_file=preload_pmx_file,
@@ -54,6 +55,8 @@ def objective_fun(modulus, params):
                                              params=f'["modulus={modulus}; poisson={poisson}"]',
                                              number_of_cores=number_of_cores)
     calculix_runner_preload.regenerate_run()
+    
+    print("\nFinished running preload simulation...")
     
     # Get the Z displacement from the preload and solve for the total required
     # displacement. This will be the minimum value since the load is in the
@@ -65,6 +68,7 @@ def objective_fun(modulus, params):
     
     total_displacement = np.abs(minDef) + np.abs(displacement) # Assumes the displacement is defined as a positive value but used as a negative value in the simulation
     
+    print("\nRunning displacement simulation...")
     calculix_runner_displacement = CalculiXRunner(results_directory,
                                                   ccx_executable,
                                                   pmx_file=disp_pmx_file,
@@ -72,13 +76,16 @@ def objective_fun(modulus, params):
                                                   geo_target_file=geo_target_file,
                                                   params=f'["modulus={modulus}; poisson={poisson}; displacement={total_displacement}"]',
                                                   number_of_cores=number_of_cores)
+    calculix_runner_displacement.regenerate_run()
+    
+    print("\nFinished running preload simulation")
     
     # Get the contact force from the .dat file
-    displacement_file = os.basename(disp_pmx_file)
-    dat_path = results_directory + '\\' + displacement_file + '.dat'    # Try this with a path library or os
-    CFZ = get_contact_force(dat_path)['FZ']
+    displacement_file = os.path.splitext(os.path.basename(disp_pmx_file))[0]
+    dat_path = results_directory + '/' + displacement_file + '.dat'    # Try this with a path library or os
+    df_results = get_contact_force(dat_path)
     
-    return CFZ
+    return df_results
     
     # Use CFZ and displacement to run regression and get the stiffness
     

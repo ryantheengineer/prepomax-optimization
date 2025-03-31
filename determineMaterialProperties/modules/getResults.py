@@ -31,21 +31,50 @@ def get_contact_force(dat_file):
     reading_data = True
     
     cf_data = []
+    disp_data = []
+    time_data = []
     with open(dat_file, 'r') as file:
-        for i, line in enumerate(file):
+        for line in file:
             if reading_data:
-                if line.startswith("   total surface force (fx,fy,fz)"):
-                    fx = float(file[i].split()[0])
-                    fy = float(file[i].split()[1])
-                    fz = float(file[i].split()[2])
-                    mx = float(file[i].split()[3])
-                    my = float(file[i].split()[4])
-                    mz = float(file[i].split()[5])
+                if "total surface force (fx,fy,fz)" in line:
+                    next_line = next((l for l in file if l.strip()), None)
+                    if next_line:
+                        values = next_line.split()
+                        fx, fy, fz, mx, my, mz = map(float, values[:6])
+                        cf_data.append([fx, fy, fz, mx, my, mz])
+                    # next_line = next(file, None)
+                    # if next_line:
+                    #     fx = float(next_line.split()[0])
+                    #     fy = float(next_line.split()[1])
+                    #     fz = float(next_line.split()[2])
+                    #     mx = float(next_line.split()[3])
+                    #     my = float(next_line.split()[4])
+                    #     mz = float(next_line.split()[5])
+                        
+                    #     cf_data.append([fx, fy, fz, mx, my, mz])
                     
-                    cf_data.append([fx, fy, fz, mx, my, mz])
+                elif "displacements (vx,vy,vz) for set REFERENCE_POINT-ANVIL_REF" in line:
+                    time_data.append(float(line.split()[-1]))
+                    
+                    next_line = next((l for l in file if l.strip()), None)
+                    if next_line:
+                        values = next_line.split()
+                        ux, uy, uz = map(float, values[1:4])
+                        disp_data.append([ux, uy, uz])
+                    
+                    # next_line = next(file, None)
+                    # if next_line:
+                    #     ux = float(next_line.split()[1])
+                    #     uy = float(next_line.split()[2])
+                    #     uz = float(next_line.split()[3])
+                        
+                    #     disp_data.append([ux, uy, uz])
                     
     # Convert list cf_data to a dataframe
-    df = pd.DataFrame(cf_data, columns=['FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
+    df_cf_data = pd.DataFrame(cf_data, columns=['FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
+    df_disp_data = pd.DataFrame(disp_data, columns=['UX', 'UY', 'UZ'])
+    df_time_data = pd.DataFrame(time_data, columns=["TIME"])
+    df = pd.concat([df_time_data, df_disp_data, df_cf_data], axis=1)
     return df
 
 

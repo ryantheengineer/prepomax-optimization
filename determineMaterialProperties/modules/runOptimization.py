@@ -202,5 +202,5 @@ if __name__ == "__main__":
     params = load_yaml()
     
     modulus = 2000.0
-    CFZ = opt.objective_fun(modulus, params)
+    df_results = opt.objective_fun(modulus, params)
     

@@ -12,12 +12,12 @@ import os
 
 class CalculiXRunner:
     def __init__(self, working_directory, ccx_executable, pmx_file=None, geo_source_file=None, geo_target_file=None, params=None, number_of_cores=4):
-        self.working_directory = working_directory
-        self.ccx_executable = ccx_executable
+        self.working_directory = os.path.normpath(working_directory)
+        self.ccx_executable = os.path.normpath(ccx_executable)
         # self.inp_files = inp_files
-        self.pmx_file = pmx_file
-        self.geo_source_file = geo_source_file  # Geometry source file (original geometry file the .pmx file was created with)
-        self.geo_target_file = geo_target_file  # Geometry target file (new geometry file the .pmx file will be regenerated with)
+        self.pmx_file = os.path.normpath(pmx_file)
+        self.geo_source_file = os.path.normpath(geo_source_file)  # Geometry source file (original geometry file the .pmx file was created with)
+        self.geo_target_file = os.path.normpath(geo_target_file)  # Geometry target file (new geometry file the .pmx file will be regenerated with)
         self.number_of_cores = number_of_cores
         self.params = params # NOTE: params must be in the form ["a=1.2; b=31.4"] where a and b are named parameters to be changed
 
@@ -33,18 +33,20 @@ class CalculiXRunner:
         
         if self.params:
             command = [self.ccx_executable,
-                       "-p", self.params,
                        "-r", self.pmx_file,
+                       # "-p", self.params,
                        "-g", "No",
                        "-w", self.working_directory,
-                       "-t", str(self.number_of_cores),
+                       "-x", "Yes",
+                       # "-t", str(self.number_of_cores),
                        ]
         else:
             command = [self.ccx_executable,
                        "-r", self.pmx_file,
                        "-g", "No",
                        "-w", self.working_directory,
-                       "-t", str(self.number_of_cores),
+                       "-x", "Yes",
+                       # "-t", str(self.number_of_cores),
                        ]
         
         try:
