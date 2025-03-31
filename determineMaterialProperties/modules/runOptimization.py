@@ -10,6 +10,7 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import optimizeStiffnessAgainstData as opt
+from scipy.optimize import minimize_scalar
 
 # YAML file path
 YAML_FILE = "config.yaml"
@@ -24,7 +25,7 @@ PARAMETERS = {
     'disp_pmx_file': 'filepath',
     'geo_source_file': 'filepath',
     'geo_target_file': 'filepath',
-    'number_of_cores': 'integer',
+    'target_modulus': 'float',
 }
 
 PARAMETER_TOOLTIPS = {
@@ -36,7 +37,7 @@ PARAMETER_TOOLTIPS = {
     'disp_pmx_file': 'Displacement-only .pmx file',
     'geo_source_file': 'Original geometry file the .pmx file was created with',
     'geo_target_file': 'New geometry file the .pmx file will be regenerated with',
-    'number_of_cores': 'Integer number of CPU cores to use for simulation',
+    'target_modulus': 'Float modulus taken from real test. Optimization will run against this target.',
 }
 
 # Load existing YAML file or create a new one with empty values
@@ -192,6 +193,14 @@ class ParameterGUI:
         save_yaml(self.data)
         # messagebox.showinfo("Success", "Configuration saved!")
         self.root.destroy()  # Close the GUI
+        
+def find_necessary_stiffness(params):
+    result = minimize_scalar(opt.objective_fun,
+                             bounds=(1e-10, 1000000),
+                             method='bounded',
+                             args=(params)
+                             )
+    return result
 
 # Run GUI
 if __name__ == "__main__":
@@ -201,6 +210,8 @@ if __name__ == "__main__":
 
     params = load_yaml()
     
-    modulus = 2000.0
-    df_results = opt.objective_fun(modulus, params)
+    # modulus = 2000.0
+    # df_results = opt.objective_fun(modulus, params)
+    
+    result = find_necessary_stiffness(params)
     

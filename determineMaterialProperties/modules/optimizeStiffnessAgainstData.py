@@ -20,6 +20,7 @@ from getResults import get_node_deformations as getNodeDef
 from getResults import get_contact_force
 from scipy.optimize import minimize_scalar
 import yaml
+from scipy.stats import linregress
 
 
 def objective_fun(modulus, params):
@@ -37,7 +38,7 @@ def objective_fun(modulus, params):
     geo_target_file = params['geo_target_file'] # Geometry target file (new geometry file the .pmx file will be regenerated with)
     
     # Simulation parameters
-    number_of_cores = params['number_of_cores']
+    target_modulus = params['target_modulus']
     
     
     
@@ -52,8 +53,7 @@ def objective_fun(modulus, params):
                                              pmx_file=preload_pmx_file,
                                              geo_source_file=geo_source_file,
                                              geo_target_file=geo_target_file,
-                                             params=f"modulus={modulus}; poisson={poisson}",
-                                             number_of_cores=number_of_cores)
+                                             params=f"modulus={modulus}; poisson={poisson}",)
     calculix_runner_preload.regenerate_run()
     
     print("\nFinished running preload simulation...")
@@ -74,8 +74,7 @@ def objective_fun(modulus, params):
                                                   pmx_file=disp_pmx_file,
                                                   geo_source_file=geo_source_file,
                                                   geo_target_file=geo_target_file,
-                                                  params=f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}",
-                                                  number_of_cores=number_of_cores)
+                                                  params=f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}",)
     calculix_runner_displacement.regenerate_run()
     
     print("\nFinished running preload simulation")
@@ -86,8 +85,9 @@ def objective_fun(modulus, params):
     df_results = get_contact_force(dat_path)
     
     # Use df_results and displacement to run regression and get the stiffness
+    regression_modulus, intercept, r_value, p_value, std_err = linregress(df_results['UZ'].abs(), df_results['FZ'].abs())
     
-    return df_results
+    return regression_modulus - np.abs(target_modulus)
     
     
     
