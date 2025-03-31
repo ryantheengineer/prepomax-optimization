@@ -57,7 +57,9 @@ class CalculiXRunner:
             result = subprocess.run(command,
                                     cwd=self.working_directory,
                                     check=True,
-                                    capture_output=False,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    # capture_output=True,
                                     text=True)
 
             if result.stdout:

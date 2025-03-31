@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox
 import optimizeStiffnessAgainstData as opt
 from scipy.optimize import minimize_scalar
 import logging
+import matplotlib.pyplot as plt
 
 # Configure logging
 logging.basicConfig(filename="output.log",
@@ -223,7 +224,7 @@ class ParameterGUI:
 
 def find_necessary_stiffness(params):
     result = minimize_scalar(opt.objective_fun,
-                             bounds=(1e-10, 1000000),
+                             bounds=(1000.0, 3000.0),
                              method='bounded',
                              args=(params)
                              )
@@ -232,6 +233,8 @@ def find_necessary_stiffness(params):
 
 # Run GUI
 if __name__ == "__main__":
+    opt.optHistory.clear()
+
     root = tk.Tk()
     app = ParameterGUI(root)
     root.mainloop()
@@ -242,3 +245,37 @@ if __name__ == "__main__":
     # df_results = opt.objective_fun(modulus, params)
 
     result = find_necessary_stiffness(params)
+
+    # PLOT
+    fig, ax1 = plt.subplots()
+    final_modulus = opt.optHistory[-1][0]
+    final_diff = opt.optHistory[-1][1]
+
+    ax1.annotate(f'Final Modulus: {final_modulus:.2f}', xy=(len(opt.optHistory)-1, final_modulus),
+                 xytext=(len(opt.optHistory)-1, final_modulus + 10),
+                 arrowprops=dict(facecolor='blue', shrink=0.05),
+                 fontsize=10, color='blue')
+
+    color = 'blue'
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Calculated Modulus (MPa)', color=color)
+    ax1.plot(opt.optHistory[:][0], color=color)
+    ax1.set_ylim(0, 25)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax1.axhline(y=params['target_modulus'], color='lightgreen',
+                linestyle='--', label=f'Target Modulus: {params["target_modulus"]}')
+    ax1.text(len(opt.optHistory)*.3, params['target_modulus']*2,
+             f'Target Modulus: {params["target_modulus"]} [MPa]', fontsize=10, color='lightgreen')
+    ax1.legend()
+    # ax2.plot(stiffnessHistory, color=color)
+
+    fig.tight_layout()  # to ensure the right y-label is not slightly clipped
+    plot_path = os.path.join(
+        params['results_directory'], 'optimization_plot.png')
+    # plot_path = os.path.join(
+    #     resultsDirectory, 'AAA_thickness_optimization_plot.png')
+    fig.savefig(plot_path)
+    print(f"\n>> Plot saved to {plot_path}")
+
+    plt.show()

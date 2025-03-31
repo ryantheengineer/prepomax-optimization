@@ -23,9 +23,15 @@ from getResults import get_contact_force
 from scipy.stats import linregress
 import time
 
+optHistory = []
+
 
 def objective_fun(modulus, params):
+    global optHistory
+
     tStart = time.time()
+
+    print(f'\n\nTrying modulus: {modulus}')
 
     # Unpack params dictionary
     # FEA model parameters
@@ -80,7 +86,7 @@ def objective_fun(modulus, params):
                                                   params=f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}",)
     calculix_runner_displacement.regenerate_run()
 
-    print("\nFinished running preload simulation")
+    print("\nFinished running displacement simulation")
 
     # Get the contact force from the .dat file
     displacement_file = os.path.splitext(os.path.basename(disp_pmx_file))[0]
@@ -95,7 +101,10 @@ def objective_fun(modulus, params):
     deltaTime = time.time() - tStart
     print(f"Elapsed time:\t{deltaTime} [s]")
 
-    return regression_modulus - np.abs(target_modulus)
+    diff = regression_modulus - np.abs(target_modulus)
+    optHistory.append((modulus, diff))
+
+    return diff
 
     # Optimize to minimize the difference between the FEA stiffness value and
     # the test stiffness
