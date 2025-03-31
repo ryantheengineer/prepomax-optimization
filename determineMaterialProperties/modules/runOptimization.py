@@ -11,6 +11,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import optimizeStiffnessAgainstData as opt
 from scipy.optimize import minimize_scalar
+import logging
+
+# Configure logging
+logging.basicConfig(filename="output.log",
+                    level=logging.INFO,
+                    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 # YAML file path
 YAML_FILE = "config.yaml"
@@ -41,6 +47,8 @@ PARAMETER_TOOLTIPS = {
 }
 
 # Load existing YAML file or create a new one with empty values
+
+
 def load_yaml():
     if os.path.exists(YAML_FILE):
         with open(YAML_FILE, "r") as file:
@@ -49,9 +57,12 @@ def load_yaml():
         return {param: "" for param in PARAMETERS}
 
 # Save YAML file
+
+
 def save_yaml(data):
     with open(YAML_FILE, "w") as file:
         yaml.dump(data, file, default_flow_style=False)
+
 
 class Tooltip:
     def __init__(self, widget, text):
@@ -71,13 +82,15 @@ class Tooltip:
         self.tooltip.wm_overrideredirect(True)  # Remove window decorations
         self.tooltip.wm_geometry(f"+{x}+{y}")  # Position it near the widget
 
-        label = tk.Label(self.tooltip, text=self.text, background="lightyellow", relief="solid", borderwidth=1)
+        label = tk.Label(self.tooltip, text=self.text,
+                         background="lightyellow", relief="solid", borderwidth=1)
         label.pack()
 
     def hide_tooltip(self, event):
         """ Hide the tooltip """
         if self.tooltip:
             self.tooltip.destroy()
+
 
 class ParameterGUI:
     def __init__(self, root):
@@ -89,33 +102,39 @@ class ParameterGUI:
 
         # Store widgets for later access
         self.entries = {}
-        
+
         # Create GUI layout
         self.create_widgets()
 
     def create_widgets(self):
-        tk.Label(self.root, text="Parameter", font=("Arial", 12, "bold")).grid(row=0, column=0, padx=10, pady=5)
-        tk.Label(self.root, text="Current Value", font=("Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5)
-        tk.Label(self.root, text="New Value", font=("Arial", 12, "bold")).grid(row=0, column=2, padx=10, pady=5)
-        tk.Label(self.root, text="Entry", font=("Arial", 12, "bold")).grid(row=0, column=3, padx=10, pady=5)
+        tk.Label(self.root, text="Parameter", font=("Arial", 12, "bold")).grid(
+            row=0, column=0, padx=10, pady=5)
+        tk.Label(self.root, text="Current Value", font=(
+            "Arial", 12, "bold")).grid(row=0, column=1, padx=10, pady=5)
+        tk.Label(self.root, text="New Value", font=("Arial", 12, "bold")).grid(
+            row=0, column=2, padx=10, pady=5)
+        tk.Label(self.root, text="Entry", font=("Arial", 12, "bold")).grid(
+            row=0, column=3, padx=10, pady=5)
 
         for i, (param, param_type) in enumerate(PARAMETERS.items(), start=1):
             label = tk.Label(self.root, text=param, font=("Arial", 10))
             label.grid(row=i, column=0, padx=10, pady=5, sticky="w")
-            
+
             # Create tooltip for each parameter label with context info
-            tooltip_text = f"{PARAMETER_TOOLTIPS[param]}"  # Customize this text as needed
+            # Customize this text as needed
+            tooltip_text = f"{PARAMETER_TOOLTIPS[param]}"
             Tooltip(label, tooltip_text)
-            
+
             # Current value from YAML (read-only)
             current_value = self.data.get(param, "")
-            current_label = tk.Label(self.root, text=current_value, font=("Arial", 10), relief="sunken", width=50, wraplength=300)
+            current_label = tk.Label(self.root, text=current_value, font=(
+                "Arial", 10), relief="sunken", width=50, wraplength=300)
             current_label.grid(row=i, column=1, padx=10, pady=5)
 
             # New value label (updates from entry)
-            new_label = tk.Label(self.root, text=current_value, font=("Arial", 10), relief="sunken", width=50, wraplength=300)
+            new_label = tk.Label(self.root, text=current_value, font=(
+                "Arial", 10), relief="sunken", width=50, wraplength=300)
             new_label.grid(row=i, column=2, padx=10, pady=5)
-            
 
             if param_type in ["integer", "float"]:
                 entry = tk.Entry(self.root)
@@ -123,20 +142,24 @@ class ParameterGUI:
                 self.entries[param] = (entry, new_label)
 
             elif param_type == "filepath":
-                btn = tk.Button(self.root, text="Browse", command=lambda p=param, l=new_label: self.select_file(p, l))
+                btn = tk.Button(
+                    self.root, text="Browse", command=lambda p=param, l=new_label: self.select_file(p, l))
                 btn.grid(row=i, column=3, padx=10, pady=5)
                 self.entries[param] = (None, new_label)
-                
+
             elif param_type == "directory":
-                btn = tk.Button(self.root, text="Browse", command=lambda p=param, l=new_label: self.select_directory(p, l))
+                btn = tk.Button(self.root, text="Browse", command=lambda p=param,
+                                l=new_label: self.select_directory(p, l))
                 btn.grid(row=i, column=3, padx=10, pady=5)
                 self.entries[param] = (None, new_label)
 
         # Bottom Buttons
-        update_btn = tk.Button(self.root, text="Update Values", command=self.update_values, width=15)
+        update_btn = tk.Button(
+            self.root, text="Update Values", command=self.update_values, width=15)
         update_btn.grid(row=len(PARAMETERS) + 1, column=0, pady=10, padx=10)
 
-        save_btn = tk.Button(self.root, text="Accept & Run", command=self.validate_and_save, width=15, bg="green", fg="white")
+        save_btn = tk.Button(self.root, text="Accept & Run",
+                             command=self.validate_and_save, width=15, bg="green", fg="white")
         save_btn.grid(row=len(PARAMETERS) + 1, column=3, pady=10, padx=10)
 
     def select_file(self, param, label):
@@ -145,7 +168,7 @@ class ParameterGUI:
         if file_path:
             label.config(text=file_path)
             self.data[param] = file_path  # Update data immediately
-            
+
     def select_directory(self, param, label):
         """ Open file dialog and update the label """
         directory = filedialog.askdirectory(title=f"Select {param}")
@@ -168,7 +191,8 @@ class ParameterGUI:
                         label.config(text=str(new_value))
                         self.data[param] = new_value
                     except ValueError:
-                        messagebox.showwarning("Invalid Input", f"{param} must be a valid {PARAMETERS[param]}.")
+                        messagebox.showwarning(
+                            "Invalid Input", f"{param} must be a valid {PARAMETERS[param]}.")
 
     def validate_and_save(self):
         """ Ensure no empty values in 'New Value' column before saving """
@@ -176,15 +200,17 @@ class ParameterGUI:
             value = self.entries[param][1].cget("text")
             if param == 'poisson':
                 if float(value) < 0.0 or float(value) > 0.5:
-                    messagebox.showerror("Error", "Poisson's ratio must be between 0.0 and 0.5.")
+                    messagebox.showerror(
+                        "Error", "Poisson's ratio must be between 0.0 and 0.5.")
                     return
             if param == 'number_of_cores':
                 if int(value) < 1 or int(value) > os.cpu_count()-1:
-                    messagebox.showerror("Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
+                    messagebox.showerror(
+                        "Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
             if not value:
                 messagebox.showerror("Error", f"{param} cannot be empty.")
                 return
-        
+
         # for param, label in self.entries.values():
         #     if label and not label.cget("text").strip():
         #         messagebox.showerror("Error", f"{param} cannot be empty.")
@@ -193,7 +219,8 @@ class ParameterGUI:
         save_yaml(self.data)
         # messagebox.showinfo("Success", "Configuration saved!")
         self.root.destroy()  # Close the GUI
-        
+
+
 def find_necessary_stiffness(params):
     result = minimize_scalar(opt.objective_fun,
                              bounds=(1e-10, 1000000),
@@ -202,6 +229,7 @@ def find_necessary_stiffness(params):
                              )
     return result
 
+
 # Run GUI
 if __name__ == "__main__":
     root = tk.Tk()
@@ -209,9 +237,8 @@ if __name__ == "__main__":
     root.mainloop()
 
     params = load_yaml()
-    
+
     # modulus = 2000.0
     # df_results = opt.objective_fun(modulus, params)
-    
+
     result = find_necessary_stiffness(params)
-    

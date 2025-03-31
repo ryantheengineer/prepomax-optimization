@@ -29,7 +29,7 @@ def get_contact_force(dat_file):
 
     """
     reading_data = True
-    
+
     cf_data = []
     disp_data = []
     time_data = []
@@ -50,28 +50,29 @@ def get_contact_force(dat_file):
                     #     mx = float(next_line.split()[3])
                     #     my = float(next_line.split()[4])
                     #     mz = float(next_line.split()[5])
-                        
+
                     #     cf_data.append([fx, fy, fz, mx, my, mz])
-                    
+
                 elif "displacements (vx,vy,vz) for set REFERENCE_POINT-ANVIL_REF" in line:
                     time_data.append(float(line.split()[-1]))
-                    
+
                     next_line = next((l for l in file if l.strip()), None)
                     if next_line:
                         values = next_line.split()
                         ux, uy, uz = map(float, values[1:4])
                         disp_data.append([ux, uy, uz])
-                    
+
                     # next_line = next(file, None)
                     # if next_line:
                     #     ux = float(next_line.split()[1])
                     #     uy = float(next_line.split()[2])
                     #     uz = float(next_line.split()[3])
-                        
+
                     #     disp_data.append([ux, uy, uz])
-                    
+
     # Convert list cf_data to a dataframe
-    df_cf_data = pd.DataFrame(cf_data, columns=['FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
+    df_cf_data = pd.DataFrame(
+        cf_data, columns=['FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
     df_disp_data = pd.DataFrame(disp_data, columns=['UX', 'UY', 'UZ'])
     df_time_data = pd.DataFrame(time_data, columns=["TIME"])
     df = pd.concat([df_time_data, df_disp_data, df_cf_data], axis=1)
@@ -81,10 +82,10 @@ def get_contact_force(dat_file):
 def get_undeformed_node_coordinates(frd_file):
     """
     Parse undeformed node locations from an .frd file between specific markers and return it as a DataFrame.
-    
+
     Parameters:
         frd_file (str): Path to the .frd file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with node IDs as index and coordinates (x, y, z) as columns.
     """
@@ -94,14 +95,18 @@ def get_undeformed_node_coordinates(frd_file):
 
     # Open and process the .frd file
     with open(frd_file, 'r') as file:
-        for line in file:                      
+        for line in file:
             if reading_data:
                 if line.startswith(" -1"):
-                    node_id = line[3:13].strip()  # Extract Node ID (10 characters)
-                    x_coord = float(line[13:25].strip())  # Extract x-coordinate (12 characters)
-                    y_coord = float(line[25:37].strip())  # Extract y-coordinate (12 characters)
-                    z_coord = float(line[37:49].strip())  # Extract z-coordinate (12 characters)
-                    
+                    # Extract Node ID (10 characters)
+                    node_id = line[3:13].strip()
+                    # Extract x-coordinate (12 characters)
+                    x_coord = float(line[13:25].strip())
+                    # Extract y-coordinate (12 characters)
+                    y_coord = float(line[25:37].strip())
+                    # Extract z-coordinate (12 characters)
+                    z_coord = float(line[37:49].strip())
+
                     node_data.append([node_id, x_coord, y_coord, z_coord])
                 if line.startswith(" -3"):
                     break
@@ -116,10 +121,10 @@ def get_undeformed_node_coordinates(frd_file):
 def get_node_deformations(frd_file):
     """
     Parse node deformations data from a .frd file and return it as a DataFrame.
-    
+
     Parameters:
         frd_file (str): Path to the .frd file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with node IDs as index and deformations (dx, dy, dz) as columns.
     """
@@ -132,13 +137,17 @@ def get_node_deformations(frd_file):
         for line in file:
             if start_marker in line:
                 reading_data = True
-                continue  
+                continue
             if reading_data:
                 if line.startswith(" -1"):
-                    node_id = line[3:13].strip()  # Extract Node ID (10 characters)
-                    dx = float(line[13:25].strip())  # Extract dx (12 characters)
-                    dy = float(line[25:37].strip())  # Extract dy (12 characters)
-                    dz = float(line[37:49].strip())  # Extract dz (12 characters)
+                    # Extract Node ID (10 characters)
+                    node_id = line[3:13].strip()
+                    # Extract dx (12 characters)
+                    dx = float(line[13:25].strip())
+                    # Extract dy (12 characters)
+                    dy = float(line[25:37].strip())
+                    # Extract dz (12 characters)
+                    dz = float(line[37:49].strip())
 
                     nodeDeformations.append([node_id, dx, dy, dz])
                 if line.startswith(" -3"):
@@ -154,10 +163,10 @@ def get_node_deformations(frd_file):
 def get_node_stress_tensor(frd_file):
     """
     Parse node deformations data from a .frd file and return it as a DataFrame.
-    
+
     Parameters:
         frd_file (str): Path to the .frd file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with node IDs as index and deformations (dx, dy, dz) as columns.
     """
@@ -170,23 +179,32 @@ def get_node_stress_tensor(frd_file):
         for line in file:
             if start_marker in line:
                 reading_data = True
-                continue 
+                continue
             if reading_data:
                 if line.startswith(" -1"):
-                    node_id = line[3:13].strip()  # Extract Node ID (10 characters)
-                    sxx = float(line[13:25].strip())  # Extract sxx (12 characters)
-                    syy = float(line[25:37].strip())  # Extract syy (12 characters)
-                    szz = float(line[37:49].strip())  # Extract szz (12 characters)
-                    
-                    sxy = float(line[49:61].strip())  # Extract sxx (12 characters)
-                    syz = float(line[61:73].strip())  # Extract syy (12 characters)
-                    szx = float(line[73:85].strip())  # Extract szz (12 characters)
+                    # Extract Node ID (10 characters)
+                    node_id = line[3:13].strip()
+                    # Extract sxx (12 characters)
+                    sxx = float(line[13:25].strip())
+                    # Extract syy (12 characters)
+                    syy = float(line[25:37].strip())
+                    # Extract szz (12 characters)
+                    szz = float(line[37:49].strip())
 
-                    nodeStresses.append([node_id, sxx, syy, szz, sxy, syz, szx])
+                    # Extract sxx (12 characters)
+                    sxy = float(line[49:61].strip())
+                    # Extract syy (12 characters)
+                    syz = float(line[61:73].strip())
+                    # Extract szz (12 characters)
+                    szx = float(line[73:85].strip())
+
+                    nodeStresses.append(
+                        [node_id, sxx, syy, szz, sxy, syz, szx])
                 if line.startswith(" -3"):
                     break
     # Convert the parsed data to a pandas DataFrame
-    df = pd.DataFrame(nodeStresses, columns=['Node ID', 'sxx', 'syy', 'szz', 'sxy', 'syz', 'szx'])
+    df = pd.DataFrame(nodeStresses, columns=[
+                      'Node ID', 'sxx', 'syy', 'szz', 'sxy', 'syz', 'szx'])
     # Set 'Node ID' as the index
     df.set_index('Node ID', inplace=True)
 
@@ -196,10 +214,10 @@ def get_node_stress_tensor(frd_file):
 def get_node_strain_tensor(frd_file):
     """
     Parse node deformations data from a .frd file and return it as a DataFrame.
-    
+
     Parameters:
         frd_file (str): Path to the .frd file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with node IDs as index and deformations (dx, dy, dz) as columns.
     """
@@ -215,20 +233,29 @@ def get_node_strain_tensor(frd_file):
                 continue
             if reading_data:
                 if line.startswith(" -1"):
-                    node_id = line[3:13].strip()  # Extract Node ID (10 characters)
-                    exx = float(line[13:25].strip())  # Extract exx (12 characters)
-                    eyy = float(line[25:37].strip())  # Extract eyy (12 characters)
-                    ezz = float(line[37:49].strip())  # Extract ezz (12 characters)
-                    
-                    exy = float(line[49:61].strip())  # Extract exx (12 characters)
-                    eyz = float(line[61:73].strip())  # Extract eyy (12 characters)
-                    ezx = float(line[73:85].strip())  # Extract ezz (12 characters)
+                    # Extract Node ID (10 characters)
+                    node_id = line[3:13].strip()
+                    # Extract exx (12 characters)
+                    exx = float(line[13:25].strip())
+                    # Extract eyy (12 characters)
+                    eyy = float(line[25:37].strip())
+                    # Extract ezz (12 characters)
+                    ezz = float(line[37:49].strip())
+
+                    # Extract exx (12 characters)
+                    exy = float(line[49:61].strip())
+                    # Extract eyy (12 characters)
+                    eyz = float(line[61:73].strip())
+                    # Extract ezz (12 characters)
+                    ezx = float(line[73:85].strip())
                     # Append parsed data
-                    nodeStresses.append([node_id, exx, eyy, ezz, exy, eyz, ezx])
+                    nodeStresses.append(
+                        [node_id, exx, eyy, ezz, exy, eyz, ezx])
                 if line.startswith(" -3"):
                     break
     # Convert the parsed data to a pandas DataFrame
-    df = pd.DataFrame(nodeStresses, columns=['Node ID', 'exx', 'eyy', 'ezz', 'exy', 'eyz', 'ezx'])
+    df = pd.DataFrame(nodeStresses, columns=[
+                      'Node ID', 'exx', 'eyy', 'ezz', 'exy', 'eyz', 'ezx'])
     # Set 'Node ID' as the index
     df.set_index('Node ID', inplace=True)
 
@@ -238,10 +265,10 @@ def get_node_strain_tensor(frd_file):
 def get_node_forces(frd_file):
     """
     Parse node deformations data from a .frd file and return it as a DataFrame.
-    
+
     Parameters:
         frd_file (str): Path to the .frd file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with node IDs as index and deformations (dx, dy, dz) as columns.
     """
@@ -257,10 +284,14 @@ def get_node_forces(frd_file):
                 continue
             if reading_data:
                 if line.startswith(" -1"):
-                    node_id = line[3:13].strip()  # Extract Node ID (10 characters)
-                    Fx = float(line[13:25].strip())  # Extract Fx (12 characters)
-                    Fy = float(line[25:37].strip())  # Extract Fy (12 characters)
-                    Fz = float(line[37:49].strip())  # Extract Fz (12 characters)
+                    # Extract Node ID (10 characters)
+                    node_id = line[3:13].strip()
+                    # Extract Fx (12 characters)
+                    Fx = float(line[13:25].strip())
+                    # Extract Fy (12 characters)
+                    Fy = float(line[25:37].strip())
+                    # Extract Fz (12 characters)
+                    Fz = float(line[37:49].strip())
 
                     nodeForces.append([node_id, Fx, Fy, Fz])
                 if line.startswith(" -3"):
@@ -274,10 +305,10 @@ def get_node_forces(frd_file):
 
 
 def combine_dataframes(
-    df_undeformed_node_coordinates, 
-    df_node_deformations, 
-    df_node_stress_tensor, 
-    df_node_strain_tensor, 
+    df_undeformed_node_coordinates,
+    df_node_deformations,
+    df_node_stress_tensor,
+    df_node_strain_tensor,
     df_node_forces
 ):
     """
@@ -311,19 +342,19 @@ def combine_dataframes(
             df_node_forces
         ], axis=1)
 
-        print("\n---------------------------------------------------------------------\n" + 
-              "DataFrames combined successfully!\tDataframe Name = 'df_results'\n" + 
-              "---------------------------------------------------------------------" )
+        print("\n---------------------------------------------------------------------\n" +
+              "DataFrames combined successfully!\tDataframe Name = 'df_results'\n" +
+              "---------------------------------------------------------------------")
 
-        print("\n\n*************************************************************************\n" + 
-              f"*\tdf_results contains these informations for : {lengths[0]} nodes.\t*\n" + 
-              "*\t\t-Undeformed Node Coordinates; x, y, z\t\t\t*\n" + 
-              "*\t\t-Node Deformations; dx, dy, dz\t\t\t\t*\n" + 
-              "*\t\t-Nodal Stress Tensor; sxx, syy, szz, sxy, syz, szx\t*\n" + 
-              "*\t\t-Nodal Strain Tensor; exx, eyy, ezz, exy, eyz, ezx\t*\n" + 
-              "*\t\t-Nodal Forces; Fx, Fy, Fz.\t\t\t\t*\n" + 
+        print("\n\n*************************************************************************\n" +
+              f"*\tdf_results contains these informations for : {lengths[0]} nodes.\t*\n" +
+              "*\t\t-Undeformed Node Coordinates; x, y, z\t\t\t*\n" +
+              "*\t\t-Node Deformations; dx, dy, dz\t\t\t\t*\n" +
+              "*\t\t-Nodal Stress Tensor; sxx, syy, szz, sxy, syz, szx\t*\n" +
+              "*\t\t-Nodal Strain Tensor; exx, eyy, ezz, exy, eyz, ezx\t*\n" +
+              "*\t\t-Nodal Forces; Fx, Fy, Fz.\t\t\t\t*\n" +
               "*************************************************************************\n")
-        
+
         # export_csv(df_results)
 
         return df_results
@@ -345,12 +376,11 @@ def export_csv(df_results):
 
     try:
         df_results.to_csv(output_csv_path, index=False)
-        print("-----------------------------------------------------------------------------------------\n" + 
-              f">>> Combined dataframe successfully exported to: {output_csv_path}\n" + 
+        print("-----------------------------------------------------------------------------------------\n" +
+              f">>> Combined dataframe successfully exported to: {output_csv_path}\n" +
               "-----------------------------------------------------------------------------------------\n")
     except Exception as e:
         print(f"\nExport failed: {e}\n")
-
 
 
 # RUN FUNCTIONS
@@ -372,4 +402,3 @@ def export_csv(df_results):
 #     df_node_strain_tensor,
 #     df_node_forces
 # )
-

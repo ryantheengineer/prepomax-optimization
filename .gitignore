@@ -21,3 +21,4 @@ simpleShellThicknessOpt/03_results/dummy.txt
 *meshRefinement
 *meshParameters
 *.out
+*.log
