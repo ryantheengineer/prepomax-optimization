@@ -52,7 +52,7 @@ def objective_fun(modulus, params):
                                              pmx_file=preload_pmx_file,
                                              geo_source_file=geo_source_file,
                                              geo_target_file=geo_target_file,
-                                             params=f'["modulus={modulus}; poisson={poisson}"]',
+                                             params=f"modulus={modulus}; poisson={poisson}",
                                              number_of_cores=number_of_cores)
     calculix_runner_preload.regenerate_run()
     
@@ -74,7 +74,7 @@ def objective_fun(modulus, params):
                                                   pmx_file=disp_pmx_file,
                                                   geo_source_file=geo_source_file,
                                                   geo_target_file=geo_target_file,
-                                                  params=f'["modulus={modulus}; poisson={poisson}; displacement={total_displacement}"]',
+                                                  params=f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}",
                                                   number_of_cores=number_of_cores)
     calculix_runner_displacement.regenerate_run()
     
@@ -85,9 +85,10 @@ def objective_fun(modulus, params):
     dat_path = results_directory + '/' + displacement_file + '.dat'    # Try this with a path library or os
     df_results = get_contact_force(dat_path)
     
+    # Use df_results and displacement to run regression and get the stiffness
+    
     return df_results
     
-    # Use CFZ and displacement to run regression and get the stiffness
     
     
     

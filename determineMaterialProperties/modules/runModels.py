@@ -34,11 +34,10 @@ class CalculiXRunner:
         if self.params:
             command = [self.ccx_executable,
                        "-r", self.pmx_file,
-                       # "-p", self.params,
+                       "-p", self.params,
                        "-g", "No",
                        "-w", self.working_directory,
                        "-x", "Yes",
-                       # "-t", str(self.number_of_cores),
                        ]
         else:
             command = [self.ccx_executable,
@@ -46,7 +45,6 @@ class CalculiXRunner:
                        "-g", "No",
                        "-w", self.working_directory,
                        "-x", "Yes",
-                       # "-t", str(self.number_of_cores),
                        ]
         
         try:
