@@ -23,7 +23,7 @@ from getResults import get_contact_force
 from scipy.stats import linregress
 import time
 
-optHistory = []
+optHistory = np.empty((0, 3))
 
 
 def objective_fun(modulus, params):
@@ -31,7 +31,9 @@ def objective_fun(modulus, params):
 
     tStart = time.time()
 
-    print(f'\n\nTrying modulus: {modulus}')
+    print('\n\n')
+    print('#'*60)
+    print(f'Trying modulus: {modulus}')
 
     # Unpack params dictionary
     # FEA model parameters
@@ -49,7 +51,7 @@ def objective_fun(modulus, params):
     geo_target_file = params['geo_target_file']
 
     # Simulation parameters
-    target_modulus = params['target_modulus']
+    target_stiffness = params['target_stiffness']
 
     # global stiffnessHistory
     # global defHistory
@@ -95,14 +97,23 @@ def objective_fun(modulus, params):
     df_results = get_contact_force(dat_path)
 
     # Use df_results and displacement to run regression and get the stiffness
-    regression_modulus, intercept, r_value, p_value, std_err = linregress(
-        df_results['UZ'].abs(), df_results['FZ'].abs())
+    X = df_results['UZ'].abs() - np.abs(df_results.loc[0, 'UZ'])
+    Y = df_results['FZ'].abs()
+    regression_modulus, intercept, r_value, p_value, std_err = linregress(X, Y)
 
     deltaTime = time.time() - tStart
-    print(f"Elapsed time:\t{deltaTime} [s]")
+    if deltaTime < 60.0:
+        print(f"Elapsed time:\t{deltaTime:.2f} [s]")
+    else:
+        print(f"Elapsed time:\t{deltaTime/60:.2f} [min]")
 
-    diff = regression_modulus - np.abs(target_modulus)
-    optHistory.append((modulus, diff))
+    diff = np.abs(regression_modulus - target_stiffness)
+    histrow = np.asarray([[modulus, regression_modulus, diff]])
+    optHistory = np.vstack((optHistory, histrow))
+    # optHistory = np.append(
+    #     optHistory, np.array([modulus, regression_modulus, diff]), axis=0)
+    print(f'Absolute Difference:\t{diff}')
+    print(f'Optimization History:\n{optHistory}')
 
     return diff
 

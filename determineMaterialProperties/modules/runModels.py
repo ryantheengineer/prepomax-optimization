@@ -57,9 +57,9 @@ class CalculiXRunner:
             result = subprocess.run(command,
                                     cwd=self.working_directory,
                                     check=True,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    # capture_output=True,
+                                    # stdout=subprocess.PIPE,
+                                    # stderr=subprocess.PIPE,
+                                    capture_output=False,
                                     text=True)
 
             if result.stdout:
@@ -75,7 +75,7 @@ class CalculiXRunner:
             # print(result.stderr)  # CalculiX error output
         except subprocess.CalledProcessError as e:
             print(f">> Error while running CalculiX for {self.pmx_file}:")
-            print(f"Result:\t{e.stdout}")
+            print(f"Result:\t{e}")
             # print(e.stderr)
             logger.exception(
                 ">> Error while running CalculiX for {self.pmx_file}")

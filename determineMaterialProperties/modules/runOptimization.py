@@ -32,7 +32,7 @@ PARAMETERS = {
     'disp_pmx_file': 'filepath',
     'geo_source_file': 'filepath',
     'geo_target_file': 'filepath',
-    'target_modulus': 'float',
+    'target_stiffness': 'float',
 }
 
 PARAMETER_TOOLTIPS = {
@@ -44,23 +44,21 @@ PARAMETER_TOOLTIPS = {
     'disp_pmx_file': 'Displacement-only .pmx file',
     'geo_source_file': 'Original geometry file the .pmx file was created with',
     'geo_target_file': 'New geometry file the .pmx file will be regenerated with',
-    'target_modulus': 'Float modulus taken from real test. Optimization will run against this target.',
+    'target_stiffness': 'Float stiffness value taken from real test (N/mm). Optimization will run against this target.',
 }
-
-# Load existing YAML file or create a new one with empty values
 
 
 def load_yaml():
+    """Load existing YAML file or create a new one with empty values."""
     if os.path.exists(YAML_FILE):
         with open(YAML_FILE, "r") as file:
             return yaml.safe_load(file) or {}
     else:
         return {param: "" for param in PARAMETERS}
 
-# Save YAML file
-
 
 def save_yaml(data):
+    """Save YAML file."""
     with open(YAML_FILE, "w") as file:
         yaml.dump(data, file, default_flow_style=False)
 
@@ -204,18 +202,13 @@ class ParameterGUI:
                     messagebox.showerror(
                         "Error", "Poisson's ratio must be between 0.0 and 0.5.")
                     return
-            if param == 'number_of_cores':
-                if int(value) < 1 or int(value) > os.cpu_count()-1:
-                    messagebox.showerror(
-                        "Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
+            # if param == 'number_of_cores':
+            #     if int(value) < 1 or int(value) > os.cpu_count()-1:
+            #         messagebox.showerror(
+            #             "Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
             if not value:
                 messagebox.showerror("Error", f"{param} cannot be empty.")
                 return
-
-        # for param, label in self.entries.values():
-        #     if label and not label.cget("text").strip():
-        #         messagebox.showerror("Error", f"{param} cannot be empty.")
-        #         return
 
         save_yaml(self.data)
         # messagebox.showinfo("Success", "Configuration saved!")
@@ -224,58 +217,48 @@ class ParameterGUI:
 
 def find_necessary_stiffness(params):
     result = minimize_scalar(opt.objective_fun,
-                             bounds=(1000.0, 3000.0),
+                             bounds=(1e-10, 20000.0),
                              method='bounded',
-                             args=(params)
+                             args=(params),
+                             options={'maxiter': 100}
                              )
     return result
 
 
 # Run GUI
-if __name__ == "__main__":
-    opt.optHistory.clear()
+root = tk.Tk()
+app = ParameterGUI(root)
+root.mainloop()
 
-    root = tk.Tk()
-    app = ParameterGUI(root)
-    root.mainloop()
+params = load_yaml()
 
-    params = load_yaml()
+# modulus = 2000.0
+# df_results = opt.objective_fun(modulus, params)
 
-    # modulus = 2000.0
-    # df_results = opt.objective_fun(modulus, params)
+result = find_necessary_stiffness(params)
 
-    result = find_necessary_stiffness(params)
+# PLOT
+fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
+# Plot data on each subplot
+axes[0].plot(opt.optHistory[:, 0])
+axes[0].set_title('Modulus of Elasticity (MPa)')
+axes[0].set_xlabel('Iteration')
 
-    # PLOT
-    fig, ax1 = plt.subplots()
-    final_modulus = opt.optHistory[-1][0]
-    final_diff = opt.optHistory[-1][1]
+axes[1].plot(opt.optHistory[:, 1])
+axes[1].set_title('Regression Stiffness (N/mm)')
+axes[1].set_xlabel('Iteration')
 
-    ax1.annotate(f'Final Modulus: {final_modulus:.2f}', xy=(len(opt.optHistory)-1, final_modulus),
-                 xytext=(len(opt.optHistory)-1, final_modulus + 10),
-                 arrowprops=dict(facecolor='blue', shrink=0.05),
-                 fontsize=10, color='blue')
+axes[2].plot(opt.optHistory[:, 2])
+axes[2].set_title(
+    f'Difference in Regression Stiffness from Target {params["target_stiffness"]} (N/mm)')
+axes[2].set_xlabel('Iteration')
 
-    color = 'blue'
-    ax1.set_xlabel('Iteration')
-    ax1.set_ylabel('Calculated Modulus (MPa)', color=color)
-    ax1.plot(opt.optHistory[:][0], color=color)
-    ax1.set_ylim(0, 25)
-    ax1.tick_params(axis='y', labelcolor=color)
+plt.suptitle('Optimization Performance')
 
-    ax1.axhline(y=params['target_modulus'], color='lightgreen',
-                linestyle='--', label=f'Target Modulus: {params["target_modulus"]}')
-    ax1.text(len(opt.optHistory)*.3, params['target_modulus']*2,
-             f'Target Modulus: {params["target_modulus"]} [MPa]', fontsize=10, color='lightgreen')
-    ax1.legend()
-    # ax2.plot(stiffnessHistory, color=color)
+fig.tight_layout()  # to ensure the right y-label is not slightly clipped
+plot_path = os.path.join(
+    params['results_directory'], 'optimization_plot.png')
+fig.savefig(plot_path)
+print(f"\n>> Plot saved to {plot_path}")
 
-    fig.tight_layout()  # to ensure the right y-label is not slightly clipped
-    plot_path = os.path.join(
-        params['results_directory'], 'optimization_plot.png')
-    # plot_path = os.path.join(
-    #     resultsDirectory, 'AAA_thickness_optimization_plot.png')
-    fig.savefig(plot_path)
-    print(f"\n>> Plot saved to {plot_path}")
-
-    plt.show()
+plt.show()
