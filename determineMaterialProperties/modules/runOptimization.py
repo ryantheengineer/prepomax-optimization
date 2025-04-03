@@ -13,6 +13,7 @@ import optimizeStiffnessAgainstData as opt
 from scipy.optimize import minimize_scalar
 import logging
 import matplotlib.pyplot as plt
+import time
 
 # Configure logging
 logging.basicConfig(filename="output.log",
@@ -235,7 +236,18 @@ params = load_yaml()
 # modulus = 2000.0
 # df_results = opt.objective_fun(modulus, params)
 
+tstart = time.time()
+
 result = find_necessary_stiffness(params)
+
+tend = time.time()
+t_calculation = tend - tstart
+if t_calculation < 60.0:
+    print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
+elif t_calculation >= 60.0 and t_calculation < 360.0:
+    print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
+else:
+    print(f"\n>> Calculation time:\t{t_calculation/360.0:.2f} hrs")
 
 # PLOT
 fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
