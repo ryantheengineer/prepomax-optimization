@@ -247,7 +247,7 @@ if t_calculation < 60.0:
 elif t_calculation >= 60.0 and t_calculation < 360.0:
     print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
 else:
-    print(f"\n>> Calculation time:\t{t_calculation/360.0:.2f} hrs")
+    print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
 
 # PLOT
 fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
