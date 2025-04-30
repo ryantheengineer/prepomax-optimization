@@ -10,80 +10,151 @@ Created on Tue Apr 29 12:50:34 2025
 
 import open3d as o3d
 import numpy as np
+import copy
 
-# Load and sample point cloud
-mesh = o3d.io.read_triangle_mesh("C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl")
-pcd = mesh.sample_points_uniformly(number_of_points=20000)
+# === Settings ===
+mesh_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl"
+output_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/flattened_edge_planes.stl"
 
-# Axis-aligned bounding box
-aabb = pcd.get_axis_aligned_bounding_box()
-min_bound = aabb.min_bound
-max_bound = aabb.max_bound
+# Parameters
+edge_face_extent_threshold = 20.0   # mm — how far from extreme point to consider
+plane_fit_distance_threshold = 5.0  # mm — for RANSAC plane fitting
+projection_distance_threshold = 1.0  # mm — max distance to project onto plane
+alignment_cosine_threshold = 0.85    # dot product between direction and normal
 
-# Slab thickness near each end in mm
-slab_thickness = 10
+directions = {
+    "+X": np.array([1, 0, 0]),
+    "-X": np.array([-1, 0, 0]),
+    "+Y": np.array([0, 1, 0]),
+    "-Y": np.array([0, -1, 0]),
+}
 
-# Bounding boxes for ±X slabs
-crop_xmin = o3d.geometry.AxisAlignedBoundingBox(
-    min_bound=[min_bound[0], min_bound[1], min_bound[2]],
-    max_bound=[min_bound[0] + slab_thickness, max_bound[1], max_bound[2]]
-)
+# === Load Mesh and Extract All Vertices as Point Cloud ===
+mesh = o3d.io.read_triangle_mesh(mesh_path)
+vertices = np.asarray(mesh.vertices)
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(vertices)
 
-crop_xmax = o3d.geometry.AxisAlignedBoundingBox(
-    min_bound=[max_bound[0] - slab_thickness, min_bound[1], min_bound[2]],
-    max_bound=[max_bound[0], max_bound[1], max_bound[2]]
-)
+# === Utilities ===
+def find_extreme_face_points(points, direction, extent_threshold):
+    proj = points @ direction
+    extreme_value = np.max(proj)
+    mask = (extreme_value - proj) < extent_threshold
+    return np.where(mask)[0]
 
-# Bounding boxes for ±Y slabs
-crop_ymin = o3d.geometry.AxisAlignedBoundingBox(
-    min_bound=[min_bound[0], min_bound[1], min_bound[2]],
-    max_bound=[max_bound[0], min_bound[1] + slab_thickness, max_bound[2]]
-)
+def fit_plane_and_validate(points, expected_dir, distance_thresh, align_thresh):
+    subset_pcd = o3d.geometry.PointCloud()
+    subset_pcd.points = o3d.utility.Vector3dVector(points)
+    model, inliers = subset_pcd.segment_plane(
+        distance_threshold=distance_thresh,
+        ransac_n=3,
+        num_iterations=1000,
+    )
+    normal = np.array(model[:3])
+    normal /= np.linalg.norm(normal)
+    if abs(np.dot(normal, expected_dir)) < align_thresh:
+        return None, None
+    return model, inliers
 
-crop_ymax = o3d.geometry.AxisAlignedBoundingBox(
-    min_bound=[min_bound[0], max_bound[1] - slab_thickness, min_bound[2]],
-    max_bound=[max_bound[0], max_bound[1], max_bound[2]]
-)
+def project_points_onto_plane(points, model):
+    a, b, c, d = model
+    normal = np.array([a, b, c])
+    normal = normal / np.linalg.norm(normal)
+    distances = points @ normal + d
+    return points - np.outer(distances, normal)
 
-# Crop slabs from the full point cloud
-pcd_xmin = pcd.crop(crop_xmin)
-pcd_xmax = pcd.crop(crop_xmax)
-pcd_ymin = pcd.crop(crop_ymin)
-pcd_ymax = pcd.crop(crop_ymax)
+def draw_debug_scene(title, geometries):
+    print(f"Showing: {title}")
+    o3d.visualization.draw_geometries(geometries, window_name=title)
 
-# Plane fitting function with axis alignment filter
-def fit_plane_and_color(pcd, color, axis, alignment_threshold=0.9, label=""):
-    if len(pcd.points) < 3:
-        print(f"Not enough points in {label} slice")
-        return None
+# === Modify Mesh Vertices ===
+modified_mesh = copy.deepcopy(mesh)
+all_vertices = np.asarray(modified_mesh.vertices)
+pcd_tree = o3d.geometry.KDTreeFlann(pcd)
 
-    plane_model, inliers = pcd.segment_plane(distance_threshold=1.0, ransac_n=3, num_iterations=1000)
-    normal = np.array(plane_model[:3])
-    normal_unit = normal / np.linalg.norm(normal)
+for label, dir_vec in directions.items():
+    print(f"\n--- Processing direction: {label} ---")
+    
+    # Step 1: Identify candidate extreme points
+    candidate_indices = find_extreme_face_points(all_vertices, dir_vec, edge_face_extent_threshold)
+    if len(candidate_indices) < 10:
+        print(f"Not enough points in {label} direction.")
+        continue
+    candidate_points = all_vertices[candidate_indices]
+    
+    subset_pcd = o3d.geometry.PointCloud()
+    subset_pcd.points = o3d.utility.Vector3dVector(candidate_points)
+    subset_pcd.paint_uniform_color([1, 0.7, 0])  # Orange
+    draw_debug_scene(f"{label} - Candidate Extreme Points", [mesh, subset_pcd])
 
-    alignment = np.abs(np.dot(normal_unit, axis))
-    if alignment < alignment_threshold:
-        print(f"{label} plane not aligned with axis: {normal_unit}")
-        return None
+    # Step 2: Fit RANSAC plane
+    plane_model, inliers = fit_plane_and_validate(candidate_points, dir_vec, plane_fit_distance_threshold, alignment_cosine_threshold)
+    if plane_model is None:
+        print(f"Plane in {label} direction rejected due to misalignment.")
+        continue
+    inlier_indices = np.array(candidate_indices)[inliers]
+    inlier_points = all_vertices[inlier_indices]
 
-    print(f"{label} plane found: normal = {normal_unit}, alignment = {alignment}")
-    plane = pcd.select_by_index(inliers)
-    plane.paint_uniform_color(color)
-    return plane
+    inlier_pcd = o3d.geometry.PointCloud()
+    inlier_pcd.points = o3d.utility.Vector3dVector(inlier_points)
+    inlier_pcd.paint_uniform_color([0, 1, 0])  # Green
+    draw_debug_scene(f"{label} - RANSAC Inliers", [mesh, inlier_pcd])
 
-# Detect and color planes
-plane_xmin = fit_plane_and_color(pcd_xmin, [1, 0, 0], axis=[1, 0, 0], label="Negative X")
-plane_xmax = fit_plane_and_color(pcd_xmax, [0, 1, 0], axis=[1, 0, 0], label="Positive X")
-plane_ymin = fit_plane_and_color(pcd_ymin, [0, 0, 1], axis=[0, 1, 0], label="Negative Y")
-plane_ymax = fit_plane_and_color(pcd_ymax, [1, 1, 0], axis=[0, 1, 0], label="Positive Y")
+    # Step 3: Filter points near the plane
+    a, b, c, d = plane_model
+    normal = np.array([a, b, c]) / np.linalg.norm([a, b, c])
+    distances = inlier_points @ normal + d
+    close_mask = np.abs(distances) < projection_distance_threshold
+    final_indices = inlier_indices[close_mask]
+    final_points = all_vertices[final_indices]
 
-# Visualize detected planes only
-planes_to_show = [p for p in [plane_xmin, plane_xmax, plane_ymin, plane_ymax] if p is not None]
+    if len(final_indices) == 0:
+        print(f"No points close enough to plane in {label} direction.")
+        continue
 
-if planes_to_show:
-    o3d.visualization.draw_geometries(planes_to_show)
-else:
-    print("No valid planes detected.")
+    print(f"Using {len(final_indices)} vertices from {label} direction.")
+
+    # Step 4: Project and visualize
+    projected_points = project_points_onto_plane(final_points, plane_model)
+
+    # Create lines for projection
+    line_points = []
+    lines = []
+    for i, (p_orig, p_proj) in enumerate(zip(final_points, projected_points)):
+        line_points.extend([p_orig, p_proj])
+        lines.append([2*i, 2*i + 1])
+
+    line_set = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(line_points),
+        lines=o3d.utility.Vector2iVector(lines)
+    )
+    line_set.paint_uniform_color([1, 0, 0])  # Red lines
+
+    projected_pcd = o3d.geometry.PointCloud()
+    projected_pcd.points = o3d.utility.Vector3dVector(projected_points)
+    projected_pcd.paint_uniform_color([0, 0, 1])  # Blue points
+
+    draw_debug_scene(f"{label} - Projection Vectors", [mesh, inlier_pcd, projected_pcd, line_set])
+
+    # Step 5: Replace vertex positions
+    all_vertices[final_indices] = projected_points
+
+# === Finalize and Save ===
+modified_mesh.vertices = o3d.utility.Vector3dVector(all_vertices)
+modified_mesh.compute_vertex_normals()
+o3d.io.write_triangle_mesh(output_path, modified_mesh)
+print(f"\n✅ Mesh saved to: {output_path}")
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -96,14 +167,16 @@ else:
 
 # import open3d as o3d
 # import numpy as np
+# import copy
 
-# # Load and sample point cloud from the mesh
+# # Load the original mesh
 # mesh = o3d.io.read_triangle_mesh("C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl")
 # pcd = mesh.sample_points_uniformly(number_of_points=20000)
-# pcd = pcd.voxel_down_sample(voxel_size=0.5)
 
-# # print("Mesh bounding box:", mesh.get_axis_aligned_bounding_box())
-
+# # Parameters
+# distance_threshold = 0.2
+# normal_filter_axis = np.array([0, 0, 1])  # Z-axis (adjust based on your alignment)
+# alignment_threshold = 0.9  # cosine of angle to treat as "top/bottom"
 # distinct_colors = [
 #     [1, 0, 0],     # Red
 #     [0, 1, 0],     # Green
@@ -113,17 +186,11 @@ else:
 #     [0, 1, 1]      # Cyan
 # ]
 
-# # Parameters
-# distance_threshold = 1.5
-# normal_filter_axis = np.array([0, 0, 1])  # Y-axis (adjust based on your alignment)
-# alignment_threshold = 0.9  # cosine of angle to treat as "top/bottom"
-
-# # RANSAC with filtering
+# # RANSAC with filtering (to detect planes)
 # plane_models = []
 # plane_inliers = []
 # colored_planes = []
 # remaining = pcd
-
 # i = 0
 # for _ in range(10):  # Try more iterations to get 4 usable edge planes
 #     plane_model, inliers = remaining.segment_plane(
@@ -131,9 +198,9 @@ else:
 #         ransac_n=3,
 #         num_iterations=1000,
 #     )
+
 #     normal = np.array(plane_model[:3])
 #     normal_unit = normal / np.linalg.norm(normal)
-    
 #     dot = np.abs(np.dot(normal_unit, normal_filter_axis))  # how aligned with "up" axis?
 
 #     if dot < alignment_threshold:
@@ -154,10 +221,79 @@ else:
 #     if len(plane_models) >= 4:
 #         break
 
-# # Add coordinate frame and remaining cloud for context
-# coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0)
-# remaining.paint_uniform_color([0.6, 0.6, 0.6])
-# remaining_down = remaining.voxel_down_sample(voxel_size=0.5)
+# # --- Use the plane models to project the edge faces ---
+# # Create a new mesh to modify (copy the original mesh data)
+# modified_mesh = o3d.geometry.TriangleMesh()
+# modified_mesh.vertices = mesh.vertices
+# modified_mesh.triangles = mesh.triangles
 
 # # Visualize
-# o3d.visualization.draw_geometries(colored_planes + [remaining_down, coord_frame])
+# o3d.visualization.draw_geometries([modified_mesh])
+
+# # --- Function to project points onto a plane ---
+# def project_points_onto_plane(points, plane_model):
+#     a, b, c, d = plane_model
+#     normal = np.array([a, b, c])
+#     normal = normal / np.linalg.norm(normal)
+#     distances = points @ normal + d
+#     return points - np.outer(distances, normal)
+
+# # --- KDTree from mesh vertices ---
+# mesh_vertices_array = np.asarray(mesh.vertices)
+# pcd = o3d.geometry.PointCloud()
+# pcd.points = o3d.utility.Vector3dVector(mesh_vertices_array)
+# mesh_tree = o3d.geometry.KDTreeFlann(pcd)
+# # mesh_tree = o3d.geometry.KDTreeFlann(o3d.utility.Vector3dVector(mesh_vertices_array))
+
+# # --- Modify the mesh by flattening the edge faces ---
+# modified_mesh = copy.deepcopy(mesh)
+
+# for i, inliers in enumerate(plane_inliers):
+#     # Get the inlier points (from point cloud)
+#     inlier_points = np.asarray(pcd.select_by_index(inliers).points)
+    
+#     # Find closest mesh vertex indices for those inliers
+#     matched_vertex_indices = set()
+#     for p in inlier_points:
+#         _, idx, _ = mesh_tree.search_knn_vector_3d(p, 1)
+#         matched_vertex_indices.add(idx[0])
+#     matched_vertex_indices = list(matched_vertex_indices)
+
+#     # Get original vertex positions
+#     matched_vertices = mesh_vertices_array[matched_vertex_indices]
+
+#     # Project those vertices onto the plane
+#     projected_vertices = project_points_onto_plane(matched_vertices, plane_models[i])
+
+#     # Debug visualization lines (original -> projected)
+#     debug_line_points = []
+#     debug_lines = []
+#     for orig, proj in zip(matched_vertices, projected_vertices):
+#         start_idx = len(debug_line_points)
+#         debug_line_points.extend([orig, proj])
+#         debug_lines.append([start_idx, start_idx + 1])
+    
+#     debug_line_set = o3d.geometry.LineSet(
+#         points=o3d.utility.Vector3dVector(debug_line_points),
+#         lines=o3d.utility.Vector2iVector(debug_lines)
+#     )
+#     debug_line_set.paint_uniform_color([1, 0, 0])  # Red lines
+
+#     # Show the original mesh with red projection lines
+#     # o3d.visualization.draw_geometries([colored_planes[i], debug_line_set])
+#     o3d.visualization.draw_geometries([mesh, colored_planes[i], debug_line_set])
+
+#     # Apply the projected positions to the modified mesh
+#     modified_vertices = np.asarray(modified_mesh.vertices)
+#     for j, idx in enumerate(matched_vertex_indices):
+#         modified_vertices[idx] = projected_vertices[j]
+#     modified_mesh.vertices = o3d.utility.Vector3dVector(modified_vertices)
+
+
+# # --- Compute normals for the modified mesh ---
+# modified_mesh.compute_vertex_normals()
+
+# # --- Save the modified mesh as a watertight STL file ---
+# output_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/flattened_edge_planes.stl"
+# o3d.io.write_triangle_mesh(output_path, modified_mesh)
+# print(f"Exported mesh to: {output_path}")
