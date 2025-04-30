@@ -9,6 +9,7 @@ import open3d as o3d
 import numpy as np
 import math
 import copy
+from scipy.spatial import KDTree
 
 input_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl"
 output_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/flattened_edge_planes.stl"
@@ -75,7 +76,7 @@ def visualize_mesh_with_overlay(mesh, highlight_tris=None, title="Mesh"):
 
     o3d.visualization.draw_geometries([base, displaced], window_name=title)
 
-def get_edge_corner_mask(centers, axis, edge_id, length_threshold=5.0):
+def get_edge_corner_mask(centers, axis, edge_id, length_threshold=5.0, rejection_distance=20.0):
     axis_index = {'x': 0, 'y': 1, 'z': 2}[axis]
     other_axes = [i for i in range(3) if i != axis_index]
     center_axis = centers[:, axis_index]
@@ -83,7 +84,6 @@ def get_edge_corner_mask(centers, axis, edge_id, length_threshold=5.0):
     min_axis = np.min(center_axis)
     max_axis = np.max(center_axis)
     scan_positions = np.arange(min_axis, max_axis, step=1.0)
-    # scan_positions = np.linspace(min_axis, max_axis, num=20)
 
     all_selected_triangles = []
 
@@ -97,19 +97,86 @@ def get_edge_corner_mask(centers, axis, edge_id, length_threshold=5.0):
         axis1, axis2 = other_axes
         if edge_id == 0:  # max-max
             sorted_indices = np.argsort(-candidate_centers[:, axis1] - candidate_centers[:, axis2])
+            ref_point = np.array([scan_pos if i == axis_index else np.max(candidate_centers[:, i]) for i in range(3)])
         elif edge_id == 1:  # min-max
             sorted_indices = np.argsort(candidate_centers[:, axis1] - candidate_centers[:, axis2])
+            ref_point = np.array([scan_pos if i == axis_index else (np.min(candidate_centers[:, axis1]) if i == axis1 else np.max(candidate_centers[:, axis2])) for i in range(3)])
         elif edge_id == 2:  # min-min
             sorted_indices = np.argsort(candidate_centers[:, axis1] + candidate_centers[:, axis2])
+            ref_point = np.array([scan_pos if i == axis_index else np.min(candidate_centers[:, i]) for i in range(3)])
         elif edge_id == 3:  # max-min
             sorted_indices = np.argsort(-candidate_centers[:, axis1] + candidate_centers[:, axis2])
+            ref_point = np.array([scan_pos if i == axis_index else (np.max(candidate_centers[:, axis1]) if i == axis1 else np.min(candidate_centers[:, axis2])) for i in range(3)])
         else:
             continue
 
         selected = np.where(plane_mask)[0][sorted_indices[:int(length_threshold)]]
+
+        # Rejection filter based on distance from ref_point
+        distances = np.linalg.norm(centers[selected] - ref_point, axis=1)
+        selected = selected[distances <= rejection_distance]
+
         all_selected_triangles.extend(selected)
 
     return np.unique(all_selected_triangles)
+
+def dilate_triangle_indices(triangles, selected_indices, iterations=1):
+    selected_set = set(selected_indices)
+    triangle_adjacency = [[] for _ in range(len(triangles))]
+
+    # Build adjacency list
+    edge_to_triangles = {}
+    for i, tri in enumerate(triangles):
+        for j in range(3):
+            edge = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+            if edge not in edge_to_triangles:
+                edge_to_triangles[edge] = []
+            edge_to_triangles[edge].append(i)
+
+    for tris in edge_to_triangles.values():
+        for t1 in tris:
+            for t2 in tris:
+                if t1 != t2:
+                    triangle_adjacency[t1].append(t2)
+
+    # Dilation
+    for _ in range(iterations):
+        new_selected = set(selected_set)
+        for idx in selected_set:
+            new_selected.update(triangle_adjacency[idx])
+        selected_set = new_selected
+
+    return np.array(sorted(selected_set), dtype=int)
+
+def erode_triangle_indices(triangles, selected_indices, iterations=1):
+    selected_set = set(selected_indices)
+    triangle_adjacency = [[] for _ in range(len(triangles))]
+
+    # Build adjacency list
+    edge_to_triangles = {}
+    for i, tri in enumerate(triangles):
+        for j in range(3):
+            edge = tuple(sorted((tri[j], tri[(j + 1) % 3])))
+            if edge not in edge_to_triangles:
+                edge_to_triangles[edge] = []
+            edge_to_triangles[edge].append(i)
+
+    for tris in edge_to_triangles.values():
+        for t1 in tris:
+            for t2 in tris:
+                if t1 != t2:
+                    triangle_adjacency[t1].append(t2)
+
+    # Erosion
+    for _ in range(iterations):
+        new_selected = set()
+        for idx in selected_set:
+            neighbors = triangle_adjacency[idx]
+            if all(n in selected_set for n in neighbors):
+                new_selected.add(idx)
+        selected_set = new_selected
+
+    return np.array(sorted(selected_set), dtype=int)
 
 # Main process
 mesh = load_mesh(input_path)
@@ -121,13 +188,25 @@ for axis in ['x', 'y', 'z']:
         triangles = np.asarray(mesh.triangles)
         triangle_centers = np.mean(vertices[triangles], axis=1)
 
-        selected_tris = get_edge_corner_mask(triangle_centers, axis, edge_id, length_threshold=15.0)
+        selected_tris = get_edge_corner_mask(
+            triangle_centers,
+            axis,
+            edge_id,
+            length_threshold=15.0,
+            rejection_distance=15.0
+        )
+
+        # Morphological operations
+        selected_tris = dilate_triangle_indices(triangles, selected_tris, iterations=2)
+        selected_tris = erode_triangle_indices(triangles, selected_tris, iterations=1)
+
         if len(selected_tris) == 0:
             print("No triangles found for this edge.")
             continue
 
         visualize_mesh_with_overlay(mesh, highlight_tris=selected_tris,
                                     title=f"{axis.upper()} Axis, Edge {edge_id}")
+
 
 
 # # Sharpen edge
