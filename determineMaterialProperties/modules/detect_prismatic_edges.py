@@ -71,7 +71,7 @@ def plt_colormap(n):
 
 def main():
     mesh = load_mesh_trimesh(input_path)
-    labels = cluster_face_normals(mesh, n_clusters=12)  # adjust as needed
+    labels = cluster_face_normals(mesh, n_clusters=6)  # adjust as needed
 
     o3d_mesh = trimesh_to_open3d(mesh, labels)
 
