@@ -1,82 +1,96 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Thu May  1 07:23:39 2025
-
-@author: Ryan.Larson
-"""
-
+import open3d as o3d
 import numpy as np
 import trimesh
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-import open3d as o3d
 from tqdm import tqdm
 
-input_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl"
-output_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/flattened_edge_planes.stl"
+def fit_plane_ransac(vertices, distance_threshold=1e-4, ransac_n=3, num_iterations=1000):
+    """
+    Fit a plane to a set of 3D vertices using RANSAC.
+    Returns: plane_model (a, b, c, d) where ax + by + cz + d = 0
+    """
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(vertices)
+    plane_model, _ = pc.segment_plane(distance_threshold=distance_threshold,
+                                      ransac_n=ransac_n,
+                                      num_iterations=num_iterations)
+    return plane_model  # a, b, c, d
 
-# === Hardcoded path to input mesh ===
-# input_path = "your_model.stl"
+def project_points_onto_plane(points, plane_model):
+    """
+    Projects a set of 3D points onto a given plane.
+    plane_model: (a, b, c, d)
+    """
+    a, b, c, d = plane_model
+    normal = np.array([a, b, c])
+    normal /= np.linalg.norm(normal)
+    distances = (points @ normal) + d
+    projected = points - np.outer(distances, normal)
+    return projected
 
-def load_mesh_trimesh(path):
-    print(f"Loading mesh from: {path}")
-    return trimesh.load_mesh(path, force='mesh')
+def flatten_cluster_vertices(mesh, labels, target_label):
+    """
+    Use RANSAC to fit a plane to a specific cluster and project its vertices onto that plane.
+    """
+    # Get all face indices with the target label
+    face_indices = np.where(labels == target_label)[0]
+    if len(face_indices) == 0:
+        return mesh.vertices  # no update
 
-def cluster_face_normals(mesh, n_clusters=6):
-    print("Computing PCA and clustering on face normals...")
+    # Extract vertices used by those faces
+    face_vertex_indices = mesh.faces[face_indices].flatten()
+    unique_vertex_indices = np.unique(face_vertex_indices)
+    cluster_vertices = mesh.vertices[unique_vertex_indices]
 
-    normals = mesh.face_normals
-    pca = PCA(n_components=3)
-    reduced = pca.fit_transform(normals)
+    # Fit RANSAC plane
+    plane_model = fit_plane_ransac(cluster_vertices)
 
-    kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-    labels = kmeans.fit_predict(reduced)
+    # Project vertices onto the plane
+    projected_vertices = project_points_onto_plane(cluster_vertices, plane_model)
 
-    return labels
+    # Update mesh.vertices in place
+    updated_vertices = mesh.vertices.copy()
+    updated_vertices[unique_vertex_indices] = projected_vertices
+    return updated_vertices
 
-def trimesh_to_open3d(mesh, face_labels):
-    print("Converting mesh to Open3D format...")
+def process_mesh_with_ransac(input_path):
+    # Load mesh
+    mesh = trimesh.load_mesh(input_path)
 
-    vertices = np.asarray(mesh.vertices)
-    triangles = np.asarray(mesh.faces)
+    # Cluster faces by normal
+    face_normals = mesh.face_normals
+    n_clusters = 6
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0)
+    labels = kmeans.fit_predict(face_normals)
 
-    triangle_mesh = o3d.geometry.TriangleMesh()
-    triangle_mesh.vertices = o3d.utility.Vector3dVector(vertices)
-    triangle_mesh.triangles = o3d.utility.Vector3iVector(triangles)
+    # Identify +X, -X, +Y, -Y direction clusters
+    axis_dirs = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0]])
+    selected_clusters = []
 
-    # Assign a different color to each face cluster
-    n_clusters = len(set(face_labels))
-    colormap = plt_colormap(n_clusters)
+    for axis in axis_dirs:
+        # Dot product with each cluster centroid
+        similarities = kmeans.cluster_centers_ @ axis
+        best_cluster = np.argmax(similarities)
+        selected_clusters.append(best_cluster)
 
-    face_colors = np.array([colormap[label] for label in face_labels])
-    vertex_colors = np.zeros_like(vertices)
+    # Iteratively flatten the mesh by projecting selected clusters
+    current_vertices = mesh.vertices.copy()
+    for label in tqdm(selected_clusters, desc="Flattening faces"):
+        mesh.vertices = current_vertices
+        current_vertices = flatten_cluster_vertices(mesh, labels, label)
 
-    # Paint each vertex by averaging face colors (approximate visualization)
-    print("Assigning vertex colors...")
-    count = np.zeros(len(vertices))
-    for i, face in enumerate(triangles):
-        for vi in face:
-            vertex_colors[vi] += face_colors[i]
-            count[vi] += 1
-    vertex_colors = (vertex_colors.T / np.maximum(count, 1)).T
-    triangle_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
+    # Update mesh with final flattened vertices
+    mesh.vertices = current_vertices
 
-    return triangle_mesh
+    # Convert to Open3D for visualization
+    o3d_mesh = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(mesh.vertices.copy()),
+        triangles=o3d.utility.Vector3iVector(mesh.faces)
+    )
+    o3d_mesh.compute_vertex_normals()
 
-def plt_colormap(n):
-    # Generate n distinct colors using matplotlib colormap (but return as RGB)
-    import matplotlib.pyplot as plt
-    cmap = plt.cm.get_cmap('tab10' if n <= 10 else 'tab20')
-    return [cmap(i % cmap.N)[:3] for i in range(n)]
-
-def main():
-    mesh = load_mesh_trimesh(input_path)
-    labels = cluster_face_normals(mesh, n_clusters=6)  # adjust as needed
-
-    o3d_mesh = trimesh_to_open3d(mesh, labels)
-
-    print("Launching Open3D viewer...")
     o3d.visualization.draw_geometries([o3d_mesh])
 
-if __name__ == "__main__":
-    main()
+# Run
+input_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/scans/Test1/MeshBody1_Edited.stl"
+process_mesh_with_ransac(input_path)
