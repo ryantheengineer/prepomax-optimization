@@ -6,7 +6,7 @@ from math import radians, cos
 # Parameters
 angle_threshold_degrees = 20
 cos_threshold = cos(radians(angle_threshold_degrees))
-decimate_ratio = 0.4
+decimate_ratio = 0.32
 edge_index_to_test = 8  # Set to 0-11 to select a specific direction
 
 # 12 defined 45-degree direction unit vectors
@@ -15,12 +15,12 @@ target_directions = [
     Vector((1, -1, 0)).normalized(),
     Vector((1, 0, 1)).normalized(),
     Vector((1, 0, -1)).normalized(),
-    Vector((0, 1, 1)).normalized(),     # Back top long edge
-    Vector((0, 1, -1)).normalized(),    # Back bottom long edge
+    Vector((0, 1, 1)).normalized(),     # 4 Back top long edge
+    Vector((0, 1, -1)).normalized(),    # 5 Back bottom long edge
     Vector((-1, 1, 0)).normalized(),
     Vector((-1, -1, 0)).normalized(),
-    Vector((0, -1, 1)).normalized(),    # Front top long edge
-    Vector((0, -1, -1)).normalized(),   # Front bottom long edge
+    Vector((0, -1, 1)).normalized(),    # 8 Front top long edge
+    Vector((0, -1, -1)).normalized(),   # 9 Front bottom long edge
     Vector((-1, 0, 1)).normalized(),    # 
     Vector((-1, 0, -1)).normalized(),
 ]
