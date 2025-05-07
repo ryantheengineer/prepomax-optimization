@@ -22,3 +22,4 @@ simpleShellThicknessOpt/03_results/dummy.txt
 *meshParameters
 *.out
 *.log
+determineMaterialProperties/data/
