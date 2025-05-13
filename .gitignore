@@ -23,3 +23,5 @@ simpleShellThicknessOpt/03_results/dummy.txt
 *.out
 *.log
 determineMaterialProperties/data/
+*.spydata
+*.tmp
