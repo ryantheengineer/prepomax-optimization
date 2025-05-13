@@ -14,6 +14,7 @@ from scipy.optimize import minimize_scalar
 import logging
 import matplotlib.pyplot as plt
 import time
+import argparse
 
 # Configure logging
 logging.basicConfig(filename="output.log",
@@ -26,6 +27,7 @@ YAML_FILE = "config.yaml"
 # Define parameters and their types
 PARAMETERS = {
     'poisson': 'float',
+    'preload': 'float',
     'displacement': 'float',
     'results_directory': 'directory',
     'ccx_executable': 'filepath',
@@ -38,6 +40,7 @@ PARAMETERS = {
 
 PARAMETER_TOOLTIPS = {
     'poisson': "Poisson's ratio to use for simulation",
+    'preload': 'Preload (N) as a positive value',
     'displacement': 'Float displacement value for the 3-point-bend test (non-negative)',
     'results_directory': 'Directory where results files should be generated',
     'ccx_executable': 'CCX executable file (ccx_dynamic.exe, in the Solver folder of PrePoMax)',
@@ -49,10 +52,10 @@ PARAMETER_TOOLTIPS = {
 }
 
 
-def load_yaml():
+def load_yaml(yaml_file):
     """Load existing YAML file or create a new one with empty values."""
-    if os.path.exists(YAML_FILE):
-        with open(YAML_FILE, "r") as file:
+    if os.path.exists(yaml_file):
+        with open(yaml_file, "r") as file:
             return yaml.safe_load(file) or {}
     else:
         return {param: "" for param in PARAMETERS}
@@ -217,60 +220,73 @@ class ParameterGUI:
 
 
 def find_necessary_stiffness(params):
+    min_modulus = 2000.0
+    max_modulus = 50000.0
+    xatol = 10000.0           # Tolerance (in MPa) of the optimization loop. Precision of the final result.
     result = minimize_scalar(opt.objective_fun,
-                             bounds=(1e-10, 20000.0),
+                             bounds=(min_modulus, max_modulus),
                              method='bounded',
                              args=(params),
-                             options={'maxiter': 100}
+                             options={'maxiter': 100,
+                                      'xatol': xatol}
                              )
     return result
 
 
-# Run GUI
-root = tk.Tk()
-app = ParameterGUI(root)
-root.mainloop()
-
-params = load_yaml()
-
-# modulus = 2000.0
-# df_results = opt.objective_fun(modulus, params)
-
-tstart = time.time()
-
-result = find_necessary_stiffness(params)
-
-tend = time.time()
-t_calculation = tend - tstart
-if t_calculation < 60.0:
-    print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
-elif t_calculation >= 60.0 and t_calculation < 360.0:
-    print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
-else:
-    print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
-
-# PLOT
-fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
-# Plot data on each subplot
-axes[0].plot(opt.optHistory[:, 0])
-axes[0].set_title('Modulus of Elasticity (MPa)')
-axes[0].set_xlabel('Iteration')
-
-axes[1].plot(opt.optHistory[:, 1])
-axes[1].set_title('Regression Stiffness (N/mm)')
-axes[1].set_xlabel('Iteration')
-
-axes[2].plot(opt.optHistory[:, 2])
-axes[2].set_title(
-    f'Difference in Regression Stiffness from Target {params["target_stiffness"]} (N/mm)')
-axes[2].set_xlabel('Iteration')
-
-plt.suptitle('Optimization Performance')
-
-fig.tight_layout()  # to ensure the right y-label is not slightly clipped
-plot_path = os.path.join(
-    params['results_directory'], 'optimization_plot.png')
-fig.savefig(plot_path)
-print(f"\n>> Plot saved to {plot_path}")
-
-plt.show()
+if __name__ == "__main__":
+    # Run GUI
+    # root = tk.Tk()
+    # app = ParameterGUI(root)
+    # root.mainloop()
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--yaml-file', type=str, default="config.yaml")
+    args = parser.parse_args()
+    
+    yaml_file = args.yaml_file
+    # yaml_file = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/7 - Test Specific YAML Files/W1L1V1_Test1.yaml"
+    
+    params = load_yaml(yaml_file)
+    # params = load_yaml(YAML_FILE)
+    
+    # modulus = 2000.0
+    # df_results = opt.objective_fun(modulus, params)
+    
+    tstart = time.time()
+    
+    result = find_necessary_stiffness(params)
+    
+    tend = time.time()
+    t_calculation = tend - tstart
+    if t_calculation < 60.0:
+        print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
+    elif t_calculation >= 60.0 and t_calculation < 360.0:
+        print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
+    else:
+        print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
+    
+    # PLOT
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
+    # Plot data on each subplot
+    axes[0].plot(opt.optHistory[:, 0])
+    axes[0].set_title('Modulus of Elasticity (MPa)')
+    axes[0].set_xlabel('Iteration')
+    
+    axes[1].plot(opt.optHistory[:, 1])
+    axes[1].set_title('Regression Stiffness (N/mm)')
+    axes[1].set_xlabel('Iteration')
+    
+    axes[2].plot(opt.optHistory[:, 2])
+    axes[2].set_title(
+        f'Difference in Regression Stiffness from Target {params["target_stiffness"]} (N/mm)')
+    axes[2].set_xlabel('Iteration')
+    
+    plt.suptitle('Optimization Performance')
+    
+    fig.tight_layout()  # to ensure the right y-label is not slightly clipped
+    plot_path = os.path.join(
+        params['results_directory'], 'optimization_plot.png')
+    fig.savefig(plot_path)
+    print(f"\n>> Plot saved to {plot_path}")
+    
+    plt.show()

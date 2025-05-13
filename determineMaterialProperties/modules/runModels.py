@@ -60,7 +60,7 @@ class CalculiXRunner:
                                     # stdout=subprocess.PIPE,
                                     # stderr=subprocess.PIPE,
                                     capture_output=False,
-                                    text=True)
+                                    text=False)
 
             if result.stdout:
                 logger.info(result.stdout.strip())  # Log standard output
@@ -78,7 +78,7 @@ class CalculiXRunner:
             print(f"Result:\t{e}")
             # print(e.stderr)
             logger.exception(
-                ">> Error while running CalculiX for {self.pmx_file}")
+                f">> Error while running CalculiX for {self.pmx_file}")
 
         # deltaTime = time.time() - tStart
         # print(f"Elapsed time:\t{deltaTime} [s]")

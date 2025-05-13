@@ -32,6 +32,7 @@ def get_contact_force(dat_file):
 
     cf_data = []
     disp_data = []
+    rf_data = []
     time_data = []
     with open(dat_file, 'r') as file:
         for line in file:
@@ -69,13 +70,21 @@ def get_contact_force(dat_file):
                     #     uz = float(next_line.split()[3])
 
                     #     disp_data.append([ux, uy, uz])
+                    
+                elif "forces (fx,fy,fz) for set REFERENCE_POINT-ANVIL_REF" in line:
+                    next_line = next((l for l in file if l.strip()), None)
+                    if next_line:
+                        values = next_line.split()
+                        rx, ry, rz = map(float, values[1:4])
+                        rf_data.append([rx, ry, rz])
 
     # Convert list cf_data to a dataframe
     df_cf_data = pd.DataFrame(
         cf_data, columns=['FX', 'FY', 'FZ', 'MX', 'MY', 'MZ'])
     df_disp_data = pd.DataFrame(disp_data, columns=['UX', 'UY', 'UZ'])
+    df_rf_data = pd.DataFrame(rf_data, columns=['RX', 'RY', 'RZ'])
     df_time_data = pd.DataFrame(time_data, columns=["TIME"])
-    df = pd.concat([df_time_data, df_disp_data, df_cf_data], axis=1)
+    df = pd.concat([df_time_data, df_disp_data, df_cf_data, df_rf_data], axis=1)
     return df
 
 

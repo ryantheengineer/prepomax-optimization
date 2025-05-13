@@ -60,7 +60,7 @@ def position_flex_mesh(flex_mesh, l_pos):
     flex_mesh.apply_translation([-diff, 0, 0])
     
 def create_anvil(flex_mesh_top):
-    d_anvil = 5.0
+    d_anvil = 10.0
     h_anvil = 20.0
     spacing = 0.0
     
@@ -84,7 +84,7 @@ def create_anvil(flex_mesh_top):
     return anvil
 
 def create_supports(flex_mesh_bottom, l_support_x, r_support_x):
-    d_support = 5.0
+    d_support = 10.0
     h_support = 20.0
     spacing = 0.0
     
@@ -110,17 +110,18 @@ def create_supports(flex_mesh_bottom, l_support_x, r_support_x):
     
     return l_support, r_support
 
-def create_models(test_data_filepath, baseFolder):
+def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_folder):
     df_test_data = pd.read_csv(test_data_filepath)
-    scanned_meshes_folder = os.path.join(baseFolder, "scanned_meshes")
-    prepared_meshes_folder = os.path.join(baseFolder, "prepared_meshes")
+    # scanned_meshes_folder = os.path.join(baseFolder, "scanned_meshes")
+    # prepared_meshes_folder = os.path.join(baseFolder, "prepared_meshes")
+    
     
     os.makedirs(prepared_meshes_folder, exist_ok=True)
     
     # Iterate through df_test_data and create the necessary multibody STL files for simulation
     for index, row in df_test_data.iterrows():
         filename = row["filename"]
-        stl_filepath = os.path.join(scanned_meshes_folder, filename)
+        stl_filepath = os.path.join(aligned_meshes_folder, filename)
         # stl_filepath = df_test_data.loc[i, "filename"]
         flex_mesh = load_flexural_specimen(stl_filepath)
         position_flex_mesh(flex_mesh, row["L_Edge_Specimen_X"])
@@ -141,10 +142,13 @@ def create_models(test_data_filepath, baseFolder):
     
 
 if __name__ == "__main__":
-    test_data_filepath = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/test_data.csv"
-    baseFolder = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/"
+    # test_data_filepath = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/test_data.csv"
+    # baseFolder = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/"
+    test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.csv"
+    aligned_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
-    create_models(test_data_filepath, baseFolder)
+    create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_folder)
     
     
     

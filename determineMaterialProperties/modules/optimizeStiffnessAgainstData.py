@@ -38,6 +38,7 @@ def objective_fun(modulus, params):
     # Unpack params dictionary
     # FEA model parameters
     poisson = params['poisson']
+    preload = params['preload']
     displacement = params['displacement']
 
     # Filepath parameters
@@ -58,34 +59,45 @@ def objective_fun(modulus, params):
 
     # Set up and run first .pmx file (preload only)
     print("Running preload simulation...\n")
+    preload_params = f"modulus={modulus}; poisson={poisson}; preload={preload}"
     calculix_runner_preload = CalculiXRunner(results_directory,
                                              ccx_executable,
                                              pmx_file=preload_pmx_file,
                                              geo_source_file=geo_source_file,
                                              geo_target_file=geo_target_file,
-                                             params=f"modulus={modulus}; poisson={poisson}",)
+                                             params=preload_params,)
     calculix_runner_preload.regenerate_run()
 
-    print("\nFinished running preload simulation...")
+    print(f"\nFinished running preload simulation in {time.time() - tStart:.2f} [s]")
 
     # Get the Z displacement from the preload and solve for the total required
     # displacement. This will be the minimum value since the load is in the
     # negative Z direction.
-    frd_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
-    frd_path = results_directory + '/' + frd_file + ".frd"
-    # frd_path = os.path.join(results_directory, frd_file + ".frd")
-    minDef = getNodeDef(frd_path)['dz'].min()
+    # frd_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
+    # frd_path = results_directory + '/' + frd_file + ".frd"
+    # # frd_path = os.path.join(results_directory, frd_file + ".frd")
+    # minDef = getNodeDef(frd_path)['dz'].min()
+    preload_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
+    dat_path = results_directory + '/' + preload_file + '.dat'    # Try this with a path library or os
+    df_results = get_contact_force(dat_path)
+    
+    minDef = df_results['UZ'].min()
 
     # Assumes the displacement is defined as a positive value but used as a negative value in the simulation
-    total_displacement = np.abs(minDef) + np.abs(displacement)
+    preload_displacement = np.abs(minDef)
+    total_displacement = preload_displacement + np.abs(displacement)
+    
+    print(f'Preload displacement: {np.abs(minDef)}')
+    print(f'Total displacement: {total_displacement}')
 
     print("\nRunning displacement simulation...")
+    displacement_params = f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}; preload_displacement={preload_displacement}"
     calculix_runner_displacement = CalculiXRunner(results_directory,
                                                   ccx_executable,
                                                   pmx_file=disp_pmx_file,
                                                   geo_source_file=geo_source_file,
                                                   geo_target_file=geo_target_file,
-                                                  params=f"modulus={modulus}; poisson={poisson}; displacement={total_displacement}",)
+                                                  params=displacement_params,)
     calculix_runner_displacement.regenerate_run()
 
     print("\nFinished running displacement simulation")
@@ -97,15 +109,19 @@ def objective_fun(modulus, params):
     df_results = get_contact_force(dat_path)
 
     # Use df_results and displacement to run regression and get the stiffness
-    X = df_results['UZ'].abs() - np.abs(df_results.loc[0, 'UZ'])
-    Y = df_results['FZ'].abs()
+    # X = df_results['UZ'].abs() - np.abs(df_results.loc[0, 'UZ'])
+    reject_tol = 1e-5
+    filtered_df_results = df_results[df_results['RZ'].notna() & (df_results['RZ'].abs() > reject_tol)]
+    X = filtered_df_results['UZ'].abs() - filtered_df_results['UZ'].abs().iloc[0]
+    Y = filtered_df_results['RZ'].abs()
+    # Y = df_results['FZ'].abs()
     regression_modulus, intercept, r_value, p_value, std_err = linregress(X, Y)
 
     deltaTime = time.time() - tStart
     if deltaTime < 60.0:
-        print(f"Elapsed time:\t{deltaTime:.2f} [s]")
+        print(f"Total elapsed time for this run:\t{deltaTime:.2f} [s]")
     else:
-        print(f"Elapsed time:\t{deltaTime/60:.2f} [min]")
+        print(f"Total elapsed time for this run:\t{deltaTime/60:.2f} [min]")
 
     diff = np.abs(regression_modulus - target_stiffness)
     histrow = np.asarray([[modulus, regression_modulus, diff]])
