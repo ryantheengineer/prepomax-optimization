@@ -36,6 +36,25 @@ def align_mesh_with_pca(input_path, output_prefix):
     mesh_v2 = mesh.copy()
     mesh_v2.vertices = aligned_vertices_v2
     mesh_v2.export(f"{output_prefix}_aligned_negative.stl")
+    
+    # 180-degree rotation about +Z axis
+    rotation_180_z = np.array([
+        [-1,  0, 0],
+        [ 0, -1, 0],
+        [ 0,  0, 1]
+    ])
+
+    # Rotate aligned_positive by 180 degrees about Z
+    aligned_vertices_v1_rot = aligned_vertices_v1 @ rotation_180_z
+    mesh_v1_rot = mesh.copy()
+    mesh_v1_rot.vertices = aligned_vertices_v1_rot
+    mesh_v1_rot.export(f"{output_prefix}_aligned_positive_rot180z.stl")
+
+    # Rotate aligned_negative by 180 degrees about Z
+    aligned_vertices_v2_rot = aligned_vertices_v2 @ rotation_180_z
+    mesh_v2_rot = mesh.copy()
+    mesh_v2_rot.vertices = aligned_vertices_v2_rot
+    mesh_v2_rot.export(f"{output_prefix}_aligned_negative_rot180z.stl")
 
     print(f"Processed: {os.path.basename(input_path)}")
 
@@ -56,6 +75,7 @@ if __name__ == "__main__":
 
     for stl_path in stl_files:
         base_name = os.path.splitext(os.path.basename(stl_path))[0]
+        base_name = base_name.replace("_raw", "")
         output_prefix = os.path.join(output_folder, base_name)
         try:
             align_mesh_with_pca(stl_path, output_prefix)
