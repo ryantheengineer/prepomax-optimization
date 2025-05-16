@@ -28,7 +28,7 @@ def get_contact_force(dat_file):
         Contact force and moment data.
 
     """
-    reading_data = True
+    reading_data = False
 
     cf_data = []
     disp_data = []
@@ -36,6 +36,8 @@ def get_contact_force(dat_file):
     time_data = []
     with open(dat_file, 'r') as file:
         for line in file:
+            if "                        S T E P       2" in line:
+                reading_data = True
             if reading_data:
                 if "total surface force (fx,fy,fz)" in line:
                     next_line = next((l for l in file if l.strip()), None)
@@ -43,16 +45,6 @@ def get_contact_force(dat_file):
                         values = next_line.split()
                         fx, fy, fz, mx, my, mz = map(float, values[:6])
                         cf_data.append([fx, fy, fz, mx, my, mz])
-                    # next_line = next(file, None)
-                    # if next_line:
-                    #     fx = float(next_line.split()[0])
-                    #     fy = float(next_line.split()[1])
-                    #     fz = float(next_line.split()[2])
-                    #     mx = float(next_line.split()[3])
-                    #     my = float(next_line.split()[4])
-                    #     mz = float(next_line.split()[5])
-
-                    #     cf_data.append([fx, fy, fz, mx, my, mz])
 
                 elif "displacements (vx,vy,vz) for set REFERENCE_POINT-ANVIL_REF" in line:
                     time_data.append(float(line.split()[-1]))
@@ -62,14 +54,6 @@ def get_contact_force(dat_file):
                         values = next_line.split()
                         ux, uy, uz = map(float, values[1:4])
                         disp_data.append([ux, uy, uz])
-
-                    # next_line = next(file, None)
-                    # if next_line:
-                    #     ux = float(next_line.split()[1])
-                    #     uy = float(next_line.split()[2])
-                    #     uz = float(next_line.split()[3])
-
-                    #     disp_data.append([ux, uy, uz])
                     
                 elif "forces (fx,fy,fz) for set REFERENCE_POINT-ANVIL_REF" in line:
                     next_line = next((l for l in file if l.strip()), None)
