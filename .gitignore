@@ -12,7 +12,6 @@ venv/
 *.stl
 *.pmx
 temp/
-*.txt
 simpleShellThicknessOpt/03_results/AAA_thickness_optimization_plot.png
 simpleShellThicknessOpt/03_results/dummy.txt
 *.yaml
