@@ -15,11 +15,25 @@ import logging
 import matplotlib.pyplot as plt
 import time
 import argparse
+from logger_config import setup_logger
+import logging
+from datetime import datetime
+from pathlib import Path
+
+# Get the base directory (parent of this script's folder)
+base_dir = Path(__file__).resolve().parent.parent
 
 # Configure logging
-logging.basicConfig(filename="output.log",
-                    level=logging.INFO,
-                    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_dir = base_dir / "logs"
+# log_dir = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/logs"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"run_{timestamp}.log")
+setup_logger(log_file)
+
+# Get a module-specific logger
+logger = logging.getLogger(__name__)
+logger.info("runOptimization.py started")
 
 # YAML file path
 YAML_FILE = "config.yaml"
@@ -27,7 +41,7 @@ YAML_FILE = "config.yaml"
 # Define parameters and their types
 PARAMETERS = {
     'poisson': 'float',
-    'preload': 'float',
+    # 'preload': 'float',
     'displacement': 'float',
     'results_directory': 'directory',
     'ccx_executable': 'filepath',
@@ -40,7 +54,7 @@ PARAMETERS = {
 
 PARAMETER_TOOLTIPS = {
     'poisson': "Poisson's ratio to use for simulation",
-    'preload': 'Preload (N) as a positive value',
+    # 'preload': 'Preload (N) as a positive value',
     'displacement': 'Float displacement value for the 3-point-bend test (non-negative)',
     'results_directory': 'Directory where results files should be generated',
     'ccx_executable': 'CCX executable file (ccx_dynamic.exe, in the Solver folder of PrePoMax)',
@@ -52,10 +66,10 @@ PARAMETER_TOOLTIPS = {
 }
 
 
-def load_yaml(yaml_file):
+def load_yaml():
     """Load existing YAML file or create a new one with empty values."""
-    if os.path.exists(yaml_file):
-        with open(yaml_file, "r") as file:
+    if os.path.exists(YAML_FILE):
+        with open(YAML_FILE, "r") as file:
             return yaml.safe_load(file) or {}
     else:
         return {param: "" for param in PARAMETERS}
@@ -206,10 +220,10 @@ class ParameterGUI:
                     messagebox.showerror(
                         "Error", "Poisson's ratio must be between 0.0 and 0.5.")
                     return
-            # if param == 'number_of_cores':
-            #     if int(value) < 1 or int(value) > os.cpu_count()-1:
-            #         messagebox.showerror(
-            #             "Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
+            if param == 'number_of_cores':
+                if int(value) < 1 or int(value) > os.cpu_count()-1:
+                    messagebox.showerror(
+                        "Error", f"CPU cores must be between 1 and {os.cpu_count()-1}")
             if not value:
                 messagebox.showerror("Error", f"{param} cannot be empty.")
                 return
@@ -219,10 +233,7 @@ class ParameterGUI:
         self.root.destroy()  # Close the GUI
 
 
-def find_necessary_stiffness(params):
-    min_modulus = 2000.0
-    max_modulus = 50000.0
-    xatol = 10000.0           # Tolerance (in MPa) of the optimization loop. Precision of the final result.
+def find_necessary_stiffness(params, min_modulus, max_modulus, xatol):
     result = minimize_scalar(opt.objective_fun,
                              bounds=(min_modulus, max_modulus),
                              method='bounded',
@@ -235,18 +246,18 @@ def find_necessary_stiffness(params):
 
 if __name__ == "__main__":
     # Run GUI
-    # root = tk.Tk()
-    # app = ParameterGUI(root)
-    # root.mainloop()
+    root = tk.Tk()
+    app = ParameterGUI(root)
+    root.mainloop()
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--yaml-file', type=str, default="config.yaml")
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--yaml-file', type=str, default="config.yaml")
+    # args = parser.parse_args()
     
-    yaml_file = args.yaml_file
+    # yaml_file = args.yaml_file
     # yaml_file = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/7 - Test Specific YAML Files/W1L1V1_Test1.yaml"
     
-    params = load_yaml(yaml_file)
+    params = load_yaml()
     # params = load_yaml(YAML_FILE)
     
     # modulus = 2000.0
@@ -254,7 +265,16 @@ if __name__ == "__main__":
     
     tstart = time.time()
     
-    result = find_necessary_stiffness(params)
+    # Optimization bounds and tolerance
+    min_modulus = 4000.0
+    max_modulus = 12000.0
+    xatol = 5.0           # Tolerance (in MPa) of the optimization loop. This is how narrow the search window must be to exit the optimization.
+    
+    result = find_necessary_stiffness(params, min_modulus, max_modulus, xatol)
+    
+    modulus_opt = result.x
+    print(f"Modulus calculated at {modulus_opt} MPa")
+    logger.info(f"Modulus calculated at {modulus_opt} MPa")
     
     tend = time.time()
     t_calculation = tend - tstart
