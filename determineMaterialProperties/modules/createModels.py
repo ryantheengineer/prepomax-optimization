@@ -110,8 +110,22 @@ def create_supports(flex_mesh_bottom, l_support_x, r_support_x):
     
     return l_support, r_support
 
+def ensure_normals_outward(mesh: trimesh.Trimesh, mesh_name=""):
+    if not mesh.is_watertight:
+        print(f"Warning: Mesh '{mesh_name}' is not watertight. Normal orientation may be unreliable.")
+    
+    # Attempt to fix normals
+    mesh.fix_normals()
+
+    # Optional check
+    if not mesh.is_winding_consistent:
+        print(f"Warning: Mesh '{mesh_name}' has inconsistent winding after fixing normals.")
+
+    return mesh
+
+
 def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_folder):
-    df_test_data = pd.read_csv(test_data_filepath)
+    df_test_data = pd.read_excel(test_data_filepath)
     # scanned_meshes_folder = os.path.join(baseFolder, "scanned_meshes")
     # prepared_meshes_folder = os.path.join(baseFolder, "prepared_meshes")
     
@@ -125,12 +139,20 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
         # stl_filepath = df_test_data.loc[i, "filename"]
         flex_mesh = load_flexural_specimen(stl_filepath)
         position_flex_mesh(flex_mesh, row["L_Edge_Specimen_X"])
+        flex_mesh = ensure_normals_outward(flex_mesh, mesh_name="flex_mesh")
+        
         flex_mesh_top = get_top_surface_bbox(flex_mesh)
         flex_mesh_bottom = get_bottom_surface_bbox(flex_mesh)
         anvil = create_anvil(flex_mesh_top)
         l_support_x = row["L_Support_X"]
         r_support_x = row["R_Support_X"]
         l_support, r_support = create_supports(flex_mesh_bottom, l_support_x, r_support_x)
+        
+        # Ensure outward normals for cylinder bodies
+        anvil = ensure_normals_outward(anvil, mesh_name="anvil")
+        l_support = ensure_normals_outward(l_support, mesh_name="left_support")
+        r_support = ensure_normals_outward(r_support, mesh_name="right_support")
+
         
         # Combine meshes
         all_meshes = [flex_mesh, anvil, l_support, r_support]
@@ -144,7 +166,7 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
 if __name__ == "__main__":
     # test_data_filepath = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/data/test_data.csv"
     # baseFolder = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/"
-    test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.csv"
+    test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
     aligned_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
     prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
