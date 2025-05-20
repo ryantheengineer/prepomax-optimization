@@ -41,9 +41,9 @@ class CalculiXRunner:
             command = [self.ccx_executable,
                        "-r", self.pmx_file,
                        "-p", self.params,
-                       "-g", "No",
+                       "-g", "No",  # Yes shows the GUI, No hides it
                        "-w", self.working_directory,
-                       "-x", "Yes",
+                       "-x", "Yes", # Exit PrePoMax after completion of the run
                        ]
         else:
             command = [self.ccx_executable,

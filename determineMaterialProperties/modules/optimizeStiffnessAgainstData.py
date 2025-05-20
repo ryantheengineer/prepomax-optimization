@@ -23,11 +23,104 @@ from getResults import get_contact_force
 from scipy.stats import linregress
 import time
 import logging
+import trimesh
 
 logger = logging.getLogger(__name__)
 
 optHistory = np.empty((0, 3))
 
+def estimate_preload_displacement(target_stl):
+    mesh = trimesh.load_mesh(target_stl)
+
+    # Ensure a list of disconnected components
+    if isinstance(mesh, trimesh.Trimesh):
+        parts = mesh.split(only_watertight=False)  # Returns a list of meshes
+    elif isinstance(mesh, trimesh.Scene):
+        parts = list(mesh.geometry.values())
+    else:
+        raise TypeError("Unsupported mesh type")
+
+    # print(f"Loaded {len(parts)} parts")
+
+    # for i, mesh in enumerate(parts):
+    #     print(f"Part {i} center: {mesh.bounding_box.centroid}")
+    
+    specimen = parts[0]  # top body
+    anvil = parts[1]
+    l_support = parts[2]
+    r_support = parts[3]
+    
+    # def find_slice_min_max(x_loc, specimen_mesh):
+    #     plane_origin = [x_loc, 0, 0]
+    #     plane_normal = [1, 0, 0]
+    #     section = specimen_mesh.section(plane_origin=plane_origin, plane_normal=plane_normal)
+        
+    #     if section is not None:
+    #         # Project to 2D (YZ) and extract polygon vertices
+    #         slice_2D, _ = section.to_planar()
+    #         all_points = slice_2D.vertices  # N x 2 array (Y, Z)
+        
+    #         # Max Z is simply:
+    #         max_z = max(all_points[:, 1])
+    #         min_z = min(all_points[:, 1])
+    #         print(f"Max Z at X={x_loc}: {max_z}")
+    #         print(f"Min Z at X={x_loc}: {min_z}")
+    #         return max_z, min_z
+    #     else:
+    #         print("No intersection found at that X slice.")
+    #         return None, None
+        
+    def find_local_max_z(mesh, x_target, window=1.0):
+        """
+        Get the max Z value of the mesh within a narrow slab centered at x_target.
+        """
+        verts = mesh.vertices
+        x = verts[:, 0]
+        z = verts[:, 2]
+        
+        # Keep only vertices within the X window
+        mask = (x > x_target - window/2) & (x < x_target + window/2)
+        if mask.sum() == 0:
+            print("No vertices found in this X-slice window.")
+            return None
+        local_max_z = z[mask].max()
+        local_min_z = z[mask].min()
+        return local_max_z, local_min_z
+            
+    
+    # Find the local distance adjustment for the anvil
+    x_anvil = anvil.bounding_box.centroid[0]
+    z_anvil = anvil.bounds[0][2]            # min Z value of the anvil
+    x_l_support = l_support.bounding_box.centroid[0]
+    z_l_support = l_support.bounds[1][2]    # max Z value of l_support
+    x_r_support = r_support.bounding_box.centroid[0]
+    z_r_support = r_support.bounds[1][2]    # max Z value of r_support
+    
+    max_z_specimen = specimen.bounds[1][2]
+    min_z_specimen = specimen.bounds[0][2]
+    
+    # max_specimen_anvil, _ = find_slice_min_max(x_anvil, specimen)
+    # _, min_specimen_l_support = find_slice_min_max(x_l_support, specimen)
+    # _, min_specimen_r_support = find_slice_min_max(x_r_support, specimen)
+    
+    max_specimen_anvil, _ = find_local_max_z(specimen, x_anvil)
+    _, min_specimen_l_support = find_local_max_z(specimen, x_l_support)
+    _, min_specimen_r_support = find_local_max_z(specimen, x_r_support)
+
+    
+    diff_anvil = z_anvil - max_specimen_anvil
+    diff_l_support = np.abs(z_l_support - min_specimen_l_support)
+    diff_r_support = np.abs(z_r_support - min_specimen_r_support)
+    
+    avg_diff_support = (diff_l_support + diff_r_support) / 2
+    
+    preload_step_displacement = 0.2
+    preload_displacement = diff_anvil + avg_diff_support + preload_step_displacement
+    print(f"Estimated preload_displacement:\t{preload_displacement}")
+    
+    return preload_displacement
+    
+    
 
 def objective_fun(modulus, params):
     global optHistory
@@ -91,7 +184,12 @@ def objective_fun(modulus, params):
 
     # Assumes the displacement is defined as a positive value but used as a negative value in the simulation
     # preload_displacement = np.abs(minDef)
-    preload_displacement = 0.8
+    
+    # Estimate the necessary preload_displacement
+    preload_displacement = estimate_preload_displacement(geo_target_file)
+    
+    
+    # preload_displacement = 1.2
     total_displacement = preload_displacement + np.abs(displacement)
     
     # print(f'Preload displacement: {preload_displacement}')
