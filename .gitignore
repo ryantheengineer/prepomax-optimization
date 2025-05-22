@@ -11,7 +11,9 @@
 venv/
 *.step
 *.stl
+!base_geometry.stl
 *.pmx
+!displacement.pmx
 temp/
 simpleShellThicknessOpt/03_results/AAA_thickness_optimization_plot.png
 simpleShellThicknessOpt/03_results/dummy.txt
