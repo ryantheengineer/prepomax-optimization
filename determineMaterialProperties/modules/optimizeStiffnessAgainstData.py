@@ -49,26 +49,6 @@ def estimate_preload_displacement(target_stl):
     anvil = parts[1]
     l_support = parts[2]
     r_support = parts[3]
-    
-    # def find_slice_min_max(x_loc, specimen_mesh):
-    #     plane_origin = [x_loc, 0, 0]
-    #     plane_normal = [1, 0, 0]
-    #     section = specimen_mesh.section(plane_origin=plane_origin, plane_normal=plane_normal)
-        
-    #     if section is not None:
-    #         # Project to 2D (YZ) and extract polygon vertices
-    #         slice_2D, _ = section.to_planar()
-    #         all_points = slice_2D.vertices  # N x 2 array (Y, Z)
-        
-    #         # Max Z is simply:
-    #         max_z = max(all_points[:, 1])
-    #         min_z = min(all_points[:, 1])
-    #         print(f"Max Z at X={x_loc}: {max_z}")
-    #         print(f"Min Z at X={x_loc}: {min_z}")
-    #         return max_z, min_z
-    #     else:
-    #         print("No intersection found at that X slice.")
-    #         return None, None
         
     def find_local_max_z(mesh, x_target, window=1.0):
         """

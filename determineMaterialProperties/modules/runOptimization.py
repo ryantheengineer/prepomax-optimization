@@ -268,7 +268,7 @@ if __name__ == "__main__":
     # Optimization bounds and tolerance
     min_modulus = 500.0
     max_modulus = 20000.0
-    xatol = 5.0           # Tolerance (in MPa) of the optimization loop. This is how narrow the search window must be to exit the optimization.
+    xatol = 1.0           # Tolerance (in MPa) of the optimization loop. This is how narrow the search window must be to exit the optimization.
     
     result = find_necessary_stiffness(params, min_modulus, max_modulus, xatol)
     
