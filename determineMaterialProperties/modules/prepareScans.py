@@ -54,7 +54,9 @@ def align_mesh_with_pca(input_path, output_prefix):
     aligned_vertices_v2_rot = aligned_vertices_v2 @ rotation_180_z
     mesh_v2_rot = mesh.copy()
     mesh_v2_rot.vertices = aligned_vertices_v2_rot
-    mesh_v2_rot.export(f"{output_prefix}_aligned_negative_rot180z.stl")
+    export_path = f"{output_prefix}_aligned_negative_rot180z.stl"
+    print(f"Exporting to {export_path}")
+    mesh_v2_rot.export(export_path)
 
     print(f"Processed: {os.path.basename(input_path)}")
 
@@ -77,6 +79,8 @@ if __name__ == "__main__":
         base_name = os.path.splitext(os.path.basename(stl_path))[0]
         base_name = base_name.replace("_raw", "")
         output_prefix = os.path.join(output_folder, base_name)
+        # print(f'Base name:\t{base_name}')
+        # print(f'Output prefix:\t{output_prefix}')
         try:
             align_mesh_with_pca(stl_path, output_prefix)
         except Exception as e:
