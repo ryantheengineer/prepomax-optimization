@@ -61,7 +61,7 @@ def position_flex_mesh(flex_mesh, l_pos):
     
 def create_anvil(flex_mesh_top):
     d_anvil = 10.0
-    h_anvil = 20.0
+    h_anvil = 30.0
     spacing = 0.0
     
     # Create anvil cylinder
@@ -85,7 +85,7 @@ def create_anvil(flex_mesh_top):
 
 def create_supports(flex_mesh_bottom, l_support_x, r_support_x):
     d_support = 10.0
-    h_support = 20.0
+    h_support = 30.0
     spacing = 0.0
     
     # Create generic support
@@ -161,6 +161,8 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
         output_filename = f"{os.path.splitext(filename)[0]}_Test{row['Test_Num']}_prepared{os.path.splitext(filename)[1]}"
         output_filepath = os.path.join(prepared_meshes_folder, output_filename)
         merged_mesh.export(output_filepath)
+        
+        print(f"{os.path.splitext(filename)[0]}_Test{row['Test_Num']} complete")
     
 
 if __name__ == "__main__":

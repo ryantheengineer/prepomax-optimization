@@ -33,7 +33,7 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
     # Let it settle
     hz = 240.0
     tstep = 1.0 / hz
-    tsim = 5.0
+    tsim = 2.0
     nsteps = int(tsim / tstep)
     p.setRealTimeSimulation(0)          # Turn off real-time mode
     p.setTimeStep(tstep)
@@ -73,8 +73,8 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
         specimen_vis = p.createVisualShape(p.GEOM_MESH, fileName=fixed_stl_filepath, meshScale=mesh_scale)
         
         # Create support cylinders
-        cylinder_shape = p.createCollisionShape(shapeType=p.GEOM_CYLINDER, radius=5, height=20, meshScale=0.001)
-        cylinder_visual = p.createVisualShape(shapeType=p.GEOM_CYLINDER, radius=5, length=20, meshScale=0.001)
+        cylinder_shape = p.createCollisionShape(shapeType=p.GEOM_CYLINDER, radius=5, height=50, meshScale=0.001)
+        cylinder_visual = p.createVisualShape(shapeType=p.GEOM_CYLINDER, radius=5, length=50, meshScale=0.001)
         
         l_support_x = row["L_Support_X"]
         r_support_x = row["R_Support_X"]
@@ -216,11 +216,11 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
             min_L_vals.append(min_L)
             min_R_vals.append(min_R)
                 
-            if (not np.isnan(min_L)) or (not np.isnan(min_R)):
-                # Print with fixed column widths:
-                # Left column width: 12 chars, right column width: 12 chars, right-aligned
-                # Show 'N/A' if None
-                print(f"L: {min_L if min_L is not None else 'N/A':>8}    R: {min_R if min_R is not None else 'N/A':>8}")
+            # if (not np.isnan(min_L)) or (not np.isnan(min_R)):
+            #     # Print with fixed column widths:
+            #     # Left column width: 12 chars, right column width: 12 chars, right-aligned
+            #     # Show 'N/A' if None
+            #     print(f"L: {min_L if min_L is not None else 'N/A':>8}    R: {min_R if min_R is not None else 'N/A':>8}")
                 
             
                 
