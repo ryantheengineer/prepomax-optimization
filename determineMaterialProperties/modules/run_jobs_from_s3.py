@@ -11,6 +11,8 @@ import os
 import subprocess
 import botocore.exceptions
 from pathlib import Path
+import requests
+import time
 
 s3 = boto3.client('s3')
 
@@ -116,9 +118,26 @@ def process_job(job_key):
     #             f'{job_folder}/{fname}'
     #         )
     
+def terminate_instance():
+    try:
+        # Get instance ID from metadata
+        response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
+        instance_id = response.text
+        print(f"Terminating instance: {instance_id}")
+        
+        ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2b'))
+        ec2.terminate_instances(InstanceIds=[instance_id])
+        
+        # Sleep to allow shutdown
+        time.sleep(30)
+    except Exception as e:
+        print(f"Error terminating instance: {e}")
 
 for job_key in list_jobs():
     print(f"Current job key:\t{job_key}")
     if claim_job(job_key):
         process_job(job_key)
         break  # Stop after one job; instance shuts down or can loop
+        
+print("All results uploaded. Initiating shutdown...")
+terminate_instance()
