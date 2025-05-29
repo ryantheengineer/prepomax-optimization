@@ -134,7 +134,7 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
     
     # Iterate through df_test_data and create the necessary multibody STL files for simulation
     for index, row in df_test_data.iterrows():
-        filename = row["filename"]
+        filename = row["Quad Mesh File"]
         stl_filepath = os.path.join(aligned_meshes_folder, filename)
         # stl_filepath = df_test_data.loc[i, "filename"]
         flex_mesh = load_flexural_specimen(stl_filepath)
@@ -158,11 +158,23 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
         all_meshes = [flex_mesh, anvil, l_support, r_support]
         merged_mesh = trimesh.util.concatenate(all_meshes)
         
-        output_filename = f"{os.path.splitext(filename)[0]}_Test{row['Test_Num']}_prepared{os.path.splitext(filename)[1]}"
+        base_name = os.path.splitext(filename)[0]
+        base_name = base_name.replace("_positive","").replace("_negative","")
+        output_filename = f"{base_name}_Test{row['Test_Num']}{os.path.splitext(filename)[1]}"
         output_filepath = os.path.join(prepared_meshes_folder, output_filename)
         merged_mesh.export(output_filepath)
         
-        print(f"{os.path.splitext(filename)[0]}_Test{row['Test_Num']} complete")
+        # Save the job name and add it to test_data.xlsx
+        job_name = base_name.replace("_quad","") + f"_Test{row['Test_Num']}"
+        df_test_data.loc[index, "Job Name"] = job_name
+        
+        # Save the test specific mesh file name and add it to test_data.xlsx
+        df_test_data.loc[index, "Test Specific Mesh File"] = output_filepath
+        
+        print(f"{output_filename} complete")
+        
+    # Export changed dataframe
+    df_test_data.to_excel(test_data_filepath, index=False)
     
 
 if __name__ == "__main__":

@@ -94,7 +94,7 @@ def estimate_preload_displacement(target_stl):
     
     avg_diff_support = (diff_l_support + diff_r_support) / 2
     
-    preload_step_displacement = 0.2
+    preload_step_displacement = 0.1
     preload_displacement = diff_anvil + avg_diff_support + preload_step_displacement
     print(f"Estimated preload_displacement:\t{preload_displacement}")
     
@@ -117,13 +117,13 @@ def objective_fun(modulus, params):
     # Unpack params dictionary
     # FEA model parameters
     poisson = params['poisson']
-    preload = params['preload']
+    # preload = params['preload']
     displacement = params['displacement']
 
     # Filepath parameters
     results_directory = params['results_directory']
     ccx_executable = params['ccx_executable']
-    preload_pmx_file = params['preload_pmx_file']
+    # preload_pmx_file = params['preload_pmx_file']
     disp_pmx_file = params['disp_pmx_file']
     # Geometry source file (original geometry file the .pmx file was created with)
     geo_source_file = params['geo_source_file']

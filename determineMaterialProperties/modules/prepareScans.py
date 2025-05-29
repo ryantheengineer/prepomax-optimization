@@ -59,20 +59,8 @@ def align_mesh_with_pca(input_path, output_prefix):
     mesh_v2_rot.export(export_path)
 
     print(f"Processed: {os.path.basename(input_path)}")
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Batch PCA alignment for STL meshes.")
-    parser.add_argument("folder", type=str, help="Folder containing .stl files")
-    parser.add_argument("--output", type=str, default="aligned", help="Output subfolder name")
-    args = parser.parse_args()
-
-    input_folder = args.folder
-    # output_folder = os.path.join(input_folder, args.output)
-    output_folder = os.path.abspath(args.output)
-    os.makedirs(output_folder, exist_ok=True)
-
+    
+def process_scans(input_folder, output_folder):
     stl_files = glob.glob(os.path.join(input_folder, "*.stl"))
 
     for stl_path in stl_files:
@@ -86,6 +74,33 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing {stl_path}: {e}")
 
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Batch PCA alignment for STL meshes.")
+    parser.add_argument("folder", type=str, help="Folder containing .stl files")
+    parser.add_argument("--output", type=str, default="aligned", help="Output subfolder name")
+    args = parser.parse_args()
+
+    input_folder = args.folder
+    output_folder = os.path.join(input_folder, args.output)
+    output_folder = os.path.abspath(args.output)
+    os.makedirs(output_folder, exist_ok=True)
+
+    # stl_files = glob.glob(os.path.join(input_folder, "*.stl"))
+
+    # for stl_path in stl_files:
+    #     base_name = os.path.splitext(os.path.basename(stl_path))[0]
+    #     base_name = base_name.replace("_raw", "")
+    #     output_prefix = os.path.join(output_folder, base_name)
+    #     # print(f'Base name:\t{base_name}')
+    #     # print(f'Output prefix:\t{output_prefix}')
+    #     try:
+    #         align_mesh_with_pca(stl_path, output_prefix)
+    #     except Exception as e:
+    #         print(f"Error processing {stl_path}: {e}")
+    
+    process_scans(input_folder, output_folder)
 
 ### HOW TO RUN ###
 # python prepareScans.py ./stl_meshes --output ./aligned_meshes
