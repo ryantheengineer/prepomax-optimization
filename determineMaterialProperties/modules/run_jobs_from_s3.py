@@ -9,6 +9,7 @@ import boto3
 import yaml
 import os
 import subprocess
+import botocore.exceptions
 
 s3 = boto3.client('s3')
 
@@ -25,15 +26,32 @@ def list_jobs():
     result = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     return [obj['Key'] for obj in result.get('Contents', []) if obj['Key'].endswith('.yaml')]
 
+# def claim_job(job_key):
+#     # Implement a claim system (e.g., upload 'in_progress' marker)
+#     try:
+#         lock_key = job_key.replace('.yaml', '.lock')
+#         s3.get_object(Bucket=bucket, Key=lock_key)
+#         return False  # Already claimed
+#     except:
+#         s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
+#         return True
+
+
 def claim_job(job_key):
-    # Implement a claim system (e.g., upload 'in_progress' marker)
+    lock_key = job_key.replace('.yaml', '.lock')
     try:
-        lock_key = job_key.replace('.yaml', '.lock')
+        # Try to fetch the lock object
         s3.get_object(Bucket=bucket, Key=lock_key)
-        return False  # Already claimed
-    except:
-        s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
-        return True
+        return False  # Lock already exists
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == 'NoSuchKey':
+            # Lock does not exist; create it
+            s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
+            return True
+        else:
+            # Some other error occurred
+            raise
 
 def process_job(job_key):
     # Download YAML and related files
