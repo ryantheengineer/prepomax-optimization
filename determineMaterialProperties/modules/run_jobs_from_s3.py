@@ -29,7 +29,7 @@ def claim_job(job_key):
     # Implement a claim system (e.g., upload 'in_progress' marker)
     try:
         lock_key = job_key.replace('.yaml', '.lock')
-        s3.head_object(Bucket=bucket, Key=lock_key)
+        s3.get_object(Bucket=bucket, Key=lock_key)
         return False  # Already claimed
     except:
         s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
