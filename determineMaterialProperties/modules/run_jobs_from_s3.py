@@ -10,6 +10,7 @@ import yaml
 import os
 import subprocess
 import botocore.exceptions
+from pathlib import Path
 
 s3 = boto3.client('s3')
 
@@ -19,6 +20,8 @@ with open('s3_config.yaml', 'r') as f:
 bucket = config['bucket']
 prefix = config['prefix']
 
+print("")
+print("#"*60)
 print(f"Bucket:\t{bucket}")
 print(f"Prefix:\t{prefix}")
 
@@ -57,9 +60,9 @@ def process_job(job_key):
     # Download YAML and related files
     print("Downloading YAML and related files...")
     job_folder = os.path.dirname(job_key)
-    local_job_dir = '/tmp/job'
+    local_job_dir = Path('/tmp/job')
     
-    input("Press Enter to continue...")
+    # input("Press Enter to continue...")
     
     # Clean local job directory
     print(f"Cleaning local job directory:\t{local_job_dir}")
@@ -69,7 +72,7 @@ def process_job(job_key):
     else:
         os.makedirs(local_job_dir)
         
-    input("Press Enter to continue...")    
+    # input("Press Enter to continue...")    
         
     # Download all files in the job folder
     result = s3.list_objects_v2(Bucket=bucket, Prefix=job_folder + '/')
@@ -80,8 +83,16 @@ def process_job(job_key):
         s3.download_file(bucket, key, local_path)
     
     # Run FEA + optimization
-    job_yaml_path = os.path.join(local_job_dir, os.path.basename(job_key))
-    print(f"This is where the optimization will run with {job_yaml_path}")
+    # job_yaml_path = os.path.join(local_job_dir, os.path.basename(job_key))
+    job_yaml_path = local_job_dir / os.path.basename(job_key)
+    job_yaml_path_str = str(job_yaml_path)
+    
+    with open(job_yaml_path_str, 'r') as f:
+        job_config = yaml.safe_load(f)
+        
+    print(f'WORKING ON JOB:\t{job_config["test_name"]}')
+    
+    print(f"This is where the optimization will run with {job_yaml_path_str}")
     # result = subprocess.run(
     #     ['python', 'runOptimizationCLI.py', job_yaml_path],
     #     cwd=local_job_dir,
