@@ -34,15 +34,21 @@ def claim_job(job_key):
 
 def process_job(job_key):
     # Download YAML and related files
+    print("Downloading YAML and related files...")
     job_folder = os.path.dirname(job_key)
     local_job_dir = '/tmp/job'
     
+    input("Press Enter to continue...")
+    
     # Clean local job directory
+    print(f"Cleaning local job directory:\t{local_job_dir}")
     if os.path.exists(local_job_dir):
         for f in os.listdir(local_job_dir):
             os.remove(os.path.join(local_job_dir, f))
     else:
         os.makedirs(local_job_dir)
+        
+    input("Press Enter to continue...")    
         
     # Download all files in the job folder
     result = s3.list_objects_v2(Bucket=bucket, Prefix=job_folder + '/')
@@ -54,12 +60,13 @@ def process_job(job_key):
     
     # Run FEA + optimization
     job_yaml_path = os.path.join(local_job_dir, os.path.basename(job_key))
-    result = subprocess.run(
-        ['python', 'runOptimizationCLI.py', job_yaml_path],
-        cwd=local_job_dir,
-        capture_output=True,
-        text=True
-    )
+    print(f"This is where the optimization will run with {job_yaml_path}")
+    # result = subprocess.run(
+    #     ['python', 'runOptimizationCLI.py', job_yaml_path],
+    #     cwd=local_job_dir,
+    #     capture_output=True,
+    #     text=True
+    # )
     
     # # Optionally save stdout/stderr to files
     # with open(os.path.join(local_job_dir, 'stdout.log'), 'w') as f:
@@ -68,13 +75,14 @@ def process_job(job_key):
     #     f.write(result.stderr)
     
     # Upload results back to the job folder
-    for fname in os.listdir(local_job_dir):
-        if fname.endswith('.txt') or fname.endswith('.log') or fname.startswith('results'):
-            s3.upload_file(
-                os.path.join(local_job_dir, fname),
-                bucket,
-                f'{job_folder}/{fname}'
-            )
+    print("This is where the results will be uploaded back to S3")
+    # for fname in os.listdir(local_job_dir):
+    #     if fname.endswith('.txt') or fname.endswith('.log') or fname.startswith('results'):
+    #         s3.upload_file(
+    #             os.path.join(local_job_dir, fname),
+    #             bucket,
+    #             f'{job_folder}/{fname}'
+    #         )
     
 
 for job_key in list_jobs():
