@@ -18,6 +18,9 @@ with open('s3_config.yaml', 'r') as f:
 bucket = config['bucket']
 prefix = config['prefix']
 
+print(f"Bucket:\t{bucket}")
+print(f"Prefix:\t{prefix}")
+
 def list_jobs():
     result = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     return [obj['Key'] for obj in result.get('Contents', []) if obj['Key'].endswith('.yaml')]
@@ -86,6 +89,7 @@ def process_job(job_key):
     
 
 for job_key in list_jobs():
+    print(f"Current job key:\t{job_key}")
     if claim_job(job_key):
         process_job(job_key)
         break  # Stop after one job; instance shuts down or can loop
