@@ -55,7 +55,7 @@ def align_mesh_with_pca(input_path, output_prefix):
     mesh_v2_rot = mesh.copy()
     mesh_v2_rot.vertices = aligned_vertices_v2_rot
     export_path = f"{output_prefix}_aligned_negative_rot180z.stl"
-    print(f"Exporting to {export_path}")
+    # print(f"Exporting to {export_path}")
     mesh_v2_rot.export(export_path)
 
     print(f"Processed: {os.path.basename(input_path)}")
