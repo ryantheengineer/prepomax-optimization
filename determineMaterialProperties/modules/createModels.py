@@ -159,7 +159,7 @@ def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_fol
         merged_mesh = trimesh.util.concatenate(all_meshes)
         
         base_name = os.path.splitext(filename)[0]
-        base_name = base_name.replace("_positive","").replace("_negative","")
+        base_name = base_name.replace("_positive","").replace("_negative","").replace("_quad","")
         output_filename = f"{base_name}_Test{row['Test_Num']}{os.path.splitext(filename)[1]}"
         output_filepath = os.path.join(prepared_meshes_folder, output_filename)
         merged_mesh.export(output_filepath)
