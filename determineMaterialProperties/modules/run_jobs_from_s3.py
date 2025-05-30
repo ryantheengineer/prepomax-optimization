@@ -64,8 +64,6 @@ def process_job(job_key):
     job_folder = os.path.dirname(job_key)
     local_job_dir = Path('/tmp/job')
     
-    # input("Press Enter to continue...")
-    
     # Clean local job directory
     print(f"Cleaning local job directory:\t{local_job_dir}")
     if os.path.exists(local_job_dir):
@@ -74,8 +72,6 @@ def process_job(job_key):
     else:
         os.makedirs(local_job_dir)
         
-    # input("Press Enter to continue...")    
-        
     # Download all files in the job folder
     result = s3.list_objects_v2(Bucket=bucket, Prefix=job_folder + '/')
     for obj in result.get('Contents', []):
@@ -83,6 +79,10 @@ def process_job(job_key):
         filename = os.path.basename(key)
         local_path = os.path.join(local_job_dir, filename)
         s3.download_file(bucket, key, local_path)
+
+    print("Listing downloaded job files:")
+    for fname in os.listdir(local_job_dir):
+        print(f'\t{fname}')
     
     # Run FEA + optimization
     # job_yaml_path = os.path.join(local_job_dir, os.path.basename(job_key))
