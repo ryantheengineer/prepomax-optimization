@@ -242,11 +242,7 @@ def find_necessary_stiffness(params, min_modulus, max_modulus, xatol):
 
 
 if __name__ == "__main__":
-    # # Run GUI
-    # root = tk.Tk()
-    # app = ParameterGUI(root)
-    # root.mainloop()
-    
+    ### Parse arguments    
     parser = argparse.ArgumentParser(description="Flexural stiffness calculation using optimization methods.")
     parser.add_argument('yaml', type=str, help="Input yaml file")
     args = parser.parse_args()
@@ -257,6 +253,24 @@ if __name__ == "__main__":
     params = load_yaml(yaml_file)
     # params = load_yaml(YAML_FILE)
     
+    # # Get the base directory (parent of this script's folder)
+    # base_dir = Path(__file__).resolve().parent.parent
+    results_dir = params['results_directory']
+    job_name = params['job_name']
+
+    # Configure logging
+    # timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    # log_dir = base_dir / "logs"
+    # # log_dir = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/logs"
+    # os.makedirs(log_dir, exist_ok=True)
+    # log_file = os.path.join(log_dir, f"run_{timestamp}.log")
+    log_file = os.path.join(results_dir, params['log_file'])
+    setup_logger(log_file)
+
+    # Get a module-specific logger
+    logger = logging.getLogger(__name__)
+    logger.info("runOptimizationCLI.py started")
+    
     tstart = time.time()
     
     # Optimization bounds and tolerance
@@ -264,22 +278,37 @@ if __name__ == "__main__":
     max_modulus = 20000.0
     xatol = 1.0           # Tolerance (in MPa) of the optimization loop. This is how narrow the search window must be to exit the optimization.
     
+    ### Calculate the necessary modulus to get the target stiffness
     result = find_necessary_stiffness(params, min_modulus, max_modulus, xatol)
     
+    ### Save the results in a .result file
     modulus_opt = result.x
+    stiffness_opt = result.fun
     # print(f"Modulus calculated at {modulus_opt} MPa")
     logger.info(f"Modulus calculated at {modulus_opt} MPa")
     
-    tend = time.time()
-    t_calculation = tend - tstart
-    if t_calculation < 60.0:
-        print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
-    elif t_calculation >= 60.0 and t_calculation < 360.0:
-        print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
-    else:
-        print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
+    # Define the filename with your desired custom extension
+    result_filename = f"{job_name}.result"
+    result_filename = os.path.join(params['results_directory'], result_filename)
     
-    # PLOT
+    # The content you want to write to the file
+    result_content = f"Modulus:\t{modulus_opt} MPa\n" \
+                    f"Calculated Stiffness:\t{stiffness_opt} N/mm\n" \
+                    f"Target Stiffness:\t{params['target_stiffness']} N/mm\n" \
+                    f"Stiffness Error:\t{stiffness_opt - params['target_stiffness']} N/mm"
+    
+    # Open the file in write mode ('w')
+    # 'w' mode will create the file if it doesn't exist, or overwrite it if it does.
+    try:
+        with open(result_filename, 'w') as file:
+            file.write(result_content)
+        # print(f"File '{result_filename}' created successfully.")
+        logger.info(f"File '{result_filename}' created successfully.")
+    except IOError as e:
+        # print(f"Error writing to file: {e}")
+        logger.error(f"Error writing to file: {e}")
+    
+    ### Plot and save the optimization progress
     fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
     # Plot data on each subplot
     axes[0].plot(opt.optHistory[:, 0])
@@ -299,8 +328,21 @@ if __name__ == "__main__":
     
     fig.tight_layout()  # to ensure the right y-label is not slightly clipped
     plot_path = os.path.join(
-        params['results_directory'], 'optimization_plot.png')
+        params['results_directory'], f'{params["job_name"]}_optimization_plot.png')
     fig.savefig(plot_path)
-    print(f"\n>> Plot saved to {plot_path}")
+    # print(f"\n>> Plot saved to {plot_path}")
+    logger.info(f"Plot saved to {plot_path}")
     
-    plt.show()
+    # plt.show()
+
+    tend = time.time()
+    t_calculation = tend - tstart
+    if t_calculation < 60.0:
+        # print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
+        logger.info(f"Calculation time:\t{t_calculation:.2f} sec")
+    elif t_calculation >= 60.0 and t_calculation < 360.0:
+        # print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
+        logger.info(f"Calculation time:\t{t_calculation/60.0:.2f} min")
+    else:
+        # print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
+        logger.info(f"Calculation time:\t{t_calculation/3600.0:.2f} hrs")

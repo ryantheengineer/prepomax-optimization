@@ -80,6 +80,8 @@ def create_jobs(poisson):
                   'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/base_geometry.stl',
                   'geo_target_file': f'C:/Users/Administrator/job_inputs/{os.path.basename(test_mesh)}',
                   'target_stiffness': target_stiffness,
+                  'log_file': f'{job_name}.log',
+                  'job_name': job_name
             }
         
         # Create the YAML file
@@ -93,7 +95,6 @@ def create_jobs(poisson):
 
 if __name__ == "__main__":
     poisson = 0.3
-    displacement = 0.25
     
     create_jobs(poisson)
     

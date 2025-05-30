@@ -92,15 +92,20 @@ def process_job(job_key):
     with open(job_yaml_path_str, 'r') as f:
         job_config = yaml.safe_load(f)
         
-    print(f'WORKING ON JOB:\t{job_config["test_name"]}')
+    job_name = job_config["job_name"]
+    results_directory = job_config["results_directory"]
+    
+        
+    print(f'WORKING ON JOB:\t{job_name}')
+    print(f'RESULTS WILL BE SENT TO:\t{results_directory}')
     
     print(f"This is where the optimization will run with {job_yaml_path_str}")
-    # result = subprocess.run(
-    #     ['python', 'runOptimizationCLI.py', job_yaml_path],
-    #     cwd=local_job_dir,
-    #     capture_output=True,
-    #     text=True
-    # )
+    subprocess.run(
+        ['python', 'runOptimizationCLI.py', job_yaml_path_str],
+        cwd=local_job_dir,
+        capture_output=True,
+        text=True
+    )
     
     # # Optionally save stdout/stderr to files
     # with open(os.path.join(local_job_dir, 'stdout.log'), 'w') as f:
@@ -110,10 +115,13 @@ def process_job(job_key):
     
     # Upload results back to the job folder
     print("This is where the results will be uploaded back to S3")
-    # for fname in os.listdir(local_job_dir):
-    #     if fname.endswith('.txt') or fname.endswith('.log') or fname.startswith('results'):
+    extensions = (".png", ".result", ".log", ".dat")
+    for fname in os.listdir(results_directory):
+        if fname.endswith(extensions):
+            print(f"\tFile '{fname}' will be uploaded to S3")
+    #     if fname.endswith('.result') or fname.endswith('.log') or fname.startswith('results'):
     #         s3.upload_file(
-    #             os.path.join(local_job_dir, fname),
+    #             os.path.join(results_directory, fname),
     #             bucket,
     #             f'{job_folder}/{fname}'
     #         )
@@ -133,6 +141,7 @@ def terminate_instance():
     except Exception as e:
         print(f"Error terminating instance: {e}")
 
+
 for job_key in list_jobs():
     print(f"Current job key:\t{job_key}")
     if claim_job(job_key):
@@ -140,4 +149,4 @@ for job_key in list_jobs():
         break  # Stop after one job; instance shuts down or can loop
         
 print("All results uploaded. Initiating shutdown...")
-terminate_instance()
+# terminate_instance()
