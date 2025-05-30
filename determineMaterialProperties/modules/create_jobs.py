@@ -81,7 +81,8 @@ def create_jobs(poisson):
                   'geo_target_file': f'C:/Users/Administrator/job_inputs/{os.path.basename(test_mesh)}',
                   'target_stiffness': target_stiffness,
                   'log_file': f'{job_name}.log',
-                  'job_name': job_name
+                  'job_name': job_name,
+                  'opt_working_directory': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/modules',
             }
         
         # Create the YAML file

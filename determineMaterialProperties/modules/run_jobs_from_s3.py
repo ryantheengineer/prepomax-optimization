@@ -94,6 +94,7 @@ def process_job(job_key):
         
     job_name = job_config["job_name"]
     results_directory = job_config["results_directory"]
+    opt_working_directory = job_config["opt_working_directory"]
     
         
     print(f'WORKING ON JOB:\t{job_name}')
@@ -102,8 +103,7 @@ def process_job(job_key):
     print(f"This is where the optimization will run with {job_yaml_path_str}")
     subprocess.run(
         ['python', 'runOptimizationCLI.py', job_yaml_path_str],
-        cwd=local_job_dir,
-        capture_output=True,
+        cwd=opt_working_directory,
         text=True
     )
     
