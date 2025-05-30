@@ -78,7 +78,7 @@ def create_jobs(poisson):
                   'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
                   'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/displacement.pmx',
                   'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/base_geometry.stl',
-                  'geo_target_file': f'C:/Users/Administrator/job_inputs/{os.path.basename(test_mesh)}',
+                  'geo_target_file': f'C:/tmp/job/{os.path.basename(test_mesh)}',
                   'target_stiffness': target_stiffness,
                   'log_file': f'{job_name}.log',
                   'job_name': job_name,
