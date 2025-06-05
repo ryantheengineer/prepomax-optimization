@@ -10,7 +10,8 @@ folders and file structure to be uploaded to S3.
 
 from prepareScans import process_scans
 # from automatic_quad_remeshing import quad_remesh_aligned_meshes
-from createModels import create_models
+from createModelsV2 import create_models
+# from createModels import create_models
 import subprocess
 import pandas as pd
 import os

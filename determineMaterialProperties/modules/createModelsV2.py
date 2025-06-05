@@ -1,241 +1,394 @@
+def get_anvil_reference_height(flex_mesh, anvil_x=0.0):
+    """
+    Get the specimen top surface height at the anvil contact location.
+    Anvil is typically centered at X=0 (specimen center).
+    """
+    return get_specimen_height_at_x(flex_mesh, anvil_x, surface='top')
+
+def get_support_reference_height(flex_mesh, l_support_x, r_support_x):
+    """
+    Get the appropriate Z coordinate for positioning both supports.
+    Since supports must be at the same Z coordinate, we need to find
+    the height that works for both contact points.
+    
+    Returns the Z coordinate where both supports should be placed.
+    """
+    # Get specimen bottom height at each support location
+    l_specimen_bottom = get_specimen_height_at_x(flex_mesh, l_support_x, surface='bottom')
+    r_specimen_bottom = get_specimen_height_at_x(flex_mesh, r_support_x, surface='bottom')
+    
+    # For supports to be at same Z and maintain contact, use the lower of the two
+    # This ensures both supports can contact the specimen
+    support_reference_z = min(l_specimen_bottom, r_specimen_bottom)
+    
+    print(f"Support reference heights - Left: {l_specimen_bottom:.3f}, Right: {r_specimen_bottom:.3f}")
+    print(f"Using support reference Z: {support_reference_z:.3f}")
+    
+    return support_reference_z# -*- coding: utf-8 -*-
 """
-Fixed optimization with proper distance calculation and rotation sensitivity
-Now with debug visualization improvements
+Created on Mon Mar 24 14:45:07 2025
+
+@author: Ryan.Larson
+
+Create multibody STL files given a base STL file (the flexural specimen) and
+data in a CSV file for where to place the specimen and the cylindrical
+supports.
+
+IMPROVED VERSION: Includes realistic specimen placement considering natural
+resting position on supports.
 """
 
-import pybullet as p
-import pybullet_data
-import time
-import pandas as pd
-import os
-import math
-import trimesh
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+import trimesh
+import os
 
-def fix_normals(input_path, output_path):
-    mesh = trimesh.load_mesh(input_path)
+############################## ASSUMPTIONS ####################################
+# 1. Flexural sample STLs are originally oriented with their primary axis along
+#    X, their secondary axis along Y, and tertiary axis along Z
+# 2. Specimens will naturally rest on two support points with some rotation
+###############################################################################
+
+def load_flexural_specimen(stl_filepath):
+    flex_mesh = trimesh.load_mesh(stl_filepath)
+    return flex_mesh
+
+def get_top_surface_bbox(flex_mesh):
+    """
+    Get the bounding box of the flex mesh's top surface.
+    Returns the max Z coordinate (highest point of the top surface).
+    """
+    
+    # Get the axis-aligned bounding box
+    aabb_min, aabb_max = flex_mesh.bounds  # min (x, y, z) and max (x, y, z)
+    
+    # Compute bounding box dimensions
+    aabb_size = aabb_max - aabb_min
+    
+    zmax = aabb_size[2]
+    
+    return aabb_max[2]
+
+def get_bottom_surface_bbox(flex_mesh):
+    """
+    Get the bounding box of the flex mesh's bottom surface.
+    Returns the min Z coordinate (lowest point of the bottom surface).
+    """
+    # Get the axis-aligned bounding box
+    aabb_min, aabb_max = flex_mesh.bounds  # min (x, y, z) and max (x, y, z)
+    
+    # Compute bounding box dimensions
+    aabb_size = aabb_max - aabb_min
+    return aabb_min[2]
+
+def get_specimen_height_at_x(flex_mesh, target_x, search_width=2.0, surface='bottom'):
+    """
+    Get the surface height of the specimen at a specific X coordinate.
+    Uses a small search width to account for mesh discretization.
+    
+    Parameters:
+    - surface: 'bottom' for minimum Z, 'top' for maximum Z
+    """
+    vertices = flex_mesh.vertices
+    
+    # Find vertices within the search window
+    x_mask = np.abs(vertices[:, 0] - target_x) <= search_width
+    if not np.any(x_mask):
+        # If no vertices found in search window, expand search
+        search_width *= 2
+        x_mask = np.abs(vertices[:, 0] - target_x) <= search_width
+    
+    if not np.any(x_mask):
+        # Still no vertices, return specimen bound
+        if surface == 'bottom':
+            return flex_mesh.bounds[0][2]
+        else:
+            return flex_mesh.bounds[1][2]
+    
+    # Get the appropriate Z coordinate in this region
+    region_vertices = vertices[x_mask]
+    if surface == 'bottom':
+        return np.min(region_vertices[:, 2])
+    else:
+        return np.max(region_vertices[:, 2])
+
+def find_natural_resting_orientation(flex_mesh, l_support_x, r_support_x, support_radius):
+    """
+    Calculate how the specimen would naturally rest on two support points.
+    Returns the rotation angle needed and contact heights.
+    """
+    # Get bottom surface vertices (bottom 10% of specimen height)
+    vertices = flex_mesh.vertices
+    z_min, z_max = flex_mesh.bounds[0][2], flex_mesh.bounds[1][2]
+    bottom_threshold = z_min + 0.1 * (z_max - z_min)
+    bottom_vertices = vertices[vertices[:, 2] <= bottom_threshold]
+    
+    # Find potential contact points for each support
+    l_contact_candidates = bottom_vertices[
+        np.abs(bottom_vertices[:, 0] - l_support_x) <= support_radius * 1.5
+    ]
+    r_contact_candidates = bottom_vertices[
+        np.abs(bottom_vertices[:, 0] - r_support_x) <= support_radius * 1.5
+    ]
+    
+    # Get the lowest points for each support contact
+    if len(l_contact_candidates) > 0:
+        l_contact_z = np.min(l_contact_candidates[:, 2])
+    else:
+        l_contact_z = get_specimen_height_at_x(flex_mesh, l_support_x, surface='bottom')
+    
+    if len(r_contact_candidates) > 0:
+        r_contact_z = np.min(r_contact_candidates[:, 2])
+    else:
+        r_contact_z = get_specimen_height_at_x(flex_mesh, r_support_x, surface='bottom')
+    
+    # Calculate required rotation angle
+    z_diff = r_contact_z - l_contact_z
+    x_span = r_support_x - l_support_x
+    
+    if abs(x_span) < 1e-6:  # Avoid division by zero
+        rotation_angle = 0.0
+    else:
+        rotation_angle = np.arctan(z_diff / x_span)
+    
+    # Limit rotation to reasonable range (±15 degrees)
+    max_rotation = np.pi / 12  # 15 degrees
+    rotation_angle = np.clip(rotation_angle, -max_rotation, max_rotation)
+    
+    return rotation_angle, l_contact_z, r_contact_z
+
+def improve_specimen_placement(flex_mesh, l_pos, l_support_x, r_support_x, 
+                             support_radius, gap_offset=0.5):
+    """
+    Improved specimen placement that accounts for natural resting position.
+    
+    Parameters:
+    - flex_mesh: The specimen mesh
+    - l_pos: Left edge position (maintains specimen's left edge at this X coordinate)
+    - l_support_x, r_support_x: X coordinates of support cylinders
+    - support_radius: Radius of support cylinders
+    - gap_offset: Small gap to maintain between specimen and supports (mm)
+    """
+    
+    # Step 1: Initial positioning (maintain left edge constraint)
+    aabb_min, aabb_max = flex_mesh.bounds
+    diff = aabb_min[0] - l_pos
+    flex_mesh.apply_translation([-diff, 0, 0])
+    
+    # Step 2: Find natural resting orientation
+    rotation_angle, l_contact_z, r_contact_z = find_natural_resting_orientation(
+        flex_mesh, l_support_x, r_support_x, support_radius
+    )
+    
+    # Step 3: Apply rotation about Y-axis (only if significant)
+    if abs(rotation_angle) > 0.001:  # ~0.06 degrees threshold
+        # Get specimen centroid for rotation point
+        centroid = flex_mesh.centroid
+        
+        # Create rotation matrix
+        rotation_matrix = trimesh.transformations.rotation_matrix(
+            angle=rotation_angle,
+            direction=[0, 1, 0],
+            point=centroid
+        )
+        flex_mesh.apply_transform(rotation_matrix)
+        
+        # Re-adjust X position after rotation to maintain left edge constraint
+        aabb_min_new, _ = flex_mesh.bounds
+        x_drift = aabb_min_new[0] - l_pos
+        flex_mesh.apply_translation([-x_drift, 0, 0])
+        
+        # Verify final position after rotation and re-adjustment
+        final_aabb_min, _ = flex_mesh.bounds
+        print(f"Applied rotation: {np.degrees(rotation_angle):.2f} degrees")
+        print(f"Specimen min X after rotation: {final_aabb_min[0]:.3f} (target: {l_pos:.3f})")
+    
+    # Step 4: Final height adjustment
+    # Get current specimen bottom after rotation
+    current_bottom = flex_mesh.bounds[0][2]
+    
+    # Calculate where supports will be positioned (they'll be positioned later)
+    # For now, assume supports are at Z=0 and we want specimen bottom at gap_offset above
+    target_bottom_z = gap_offset
+    z_adjustment = target_bottom_z - current_bottom
+    
+    flex_mesh.apply_translation([0, 0, z_adjustment])
+    
+    # Final verification of specimen position
+    final_bounds = flex_mesh.bounds
+    print(f"Final specimen min X: {final_bounds[0][0]:.3f} (target: {l_pos:.3f})")
+    print(f"Final specimen bottom Z: {final_bounds[0][2]:.3f}")
+    
+    return flex_mesh
+
+def position_flex_mesh(flex_mesh, l_pos):
+    """
+    Original positioning function - now replaced by improve_specimen_placement
+    but kept for backward compatibility if needed.
+    """
+    aabb_min, aabb_max = flex_mesh.bounds
+    diff = aabb_min[0] - l_pos
+    flex_mesh.apply_translation([-diff, 0, 0])
+
+def create_anvil(flex_mesh, anvil_x=0.0, anvil_gap=1.0):
+    """
+    Create anvil with specified gap above specimen top surface at anvil location.
+    """
+    d_anvil = 10.0
+    h_anvil = 30.0
+    
+    # Get specimen top surface height at anvil contact location
+    specimen_top_at_anvil = get_anvil_reference_height(flex_mesh, anvil_x)
+    
+    # Create anvil cylinder
+    anvil = trimesh.creation.cylinder(
+        radius=d_anvil/2,
+        height=h_anvil,
+        sections=32
+    )
+    
+    # Rotate the cylinder to be horizontal (along Y-axis)
+    rotation_matrix = trimesh.transformations.rotation_matrix(
+        angle=np.pi / 2,  # 90-degree rotation
+        direction=[1, 0, 0],  # Rotate around the X-axis
+    )
+    anvil.apply_transform(rotation_matrix)
+    
+    # Position anvil with specified gap above specimen top surface at contact location
+    # Anvil bottom should be at specimen_top_at_anvil + anvil_gap
+    anvil_bottom_z = specimen_top_at_anvil + anvil_gap
+    anvil_center_z = anvil_bottom_z + d_anvil/2
+    anvil.apply_translation([anvil_x, 0, anvil_center_z])
+    
+    print(f"Anvil positioned - Specimen top at X={anvil_x:.1f}: {specimen_top_at_anvil:.3f}, "
+          f"Gap: {anvil_gap:.1f}, Anvil center Z: {anvil_center_z:.3f}")
+    
+    return anvil
+
+def create_supports(flex_mesh, l_support_x, r_support_x, support_gap=0.5):
+    """
+    Create supports with specified gap below specimen bottom surface.
+    Both supports are positioned at the same Z coordinate.
+    """
+    d_support = 10.0
+    h_support = 30.0
+    
+    # Get the reference Z coordinate for support positioning
+    support_reference_z = get_support_reference_height(flex_mesh, l_support_x, r_support_x)
+    
+    # Create generic support
+    cylinder = trimesh.creation.cylinder(
+        radius=d_support/2,
+        height=h_support,
+        sections=32
+    )
+    
+    # Rotate the cylinder to be horizontal (along Y-axis)
+    rotation_matrix = trimesh.transformations.rotation_matrix(
+        angle=np.pi / 2,  # 90-degree rotation
+        direction=[1, 0, 0],  # Rotate around the X-axis
+    )
+    cylinder.apply_transform(rotation_matrix)
+    
+    # Make copies of cylinder and move them
+    l_support = cylinder.copy()
+    r_support = cylinder.copy()
+    
+    # Position supports with specified gap below specimen bottom surface
+    # Support top should be at support_reference_z - support_gap
+    support_top_z = support_reference_z - support_gap
+    support_center_z = support_top_z - d_support/2
+    
+    l_support.apply_translation([l_support_x, 0, support_center_z])
+    r_support.apply_translation([r_support_x, 0, support_center_z])
+    
+    print(f"Supports positioned - Top Z: {support_top_z:.3f}, Center Z: {support_center_z:.3f}")
+    print(f"Left support at X={l_support_x:.1f}, Right support at X={r_support_x:.1f}")
+    
+    return l_support, r_support
+
+def ensure_normals_outward(mesh: trimesh.Trimesh, mesh_name=""):
     if not mesh.is_watertight:
-        print(f"⚠️ {os.path.basename(input_path)} is not watertight.")
-    mesh.rezero()
+        print(f"Warning: Mesh '{mesh_name}' is not watertight. Normal orientation may be unreliable.")
+    
+    # Attempt to fix normals
     mesh.fix_normals()
-    mesh.export(output_path)
 
+    # Optional check
+    if not mesh.is_winding_consistent:
+        print(f"Warning: Mesh '{mesh_name}' has inconsistent winding after fixing normals.")
+
+    return mesh
 
 def create_models(test_data_filepath, aligned_meshes_folder, prepared_meshes_folder):
     df_test_data = pd.read_excel(test_data_filepath)
+    
     os.makedirs(prepared_meshes_folder, exist_ok=True)
-
-    # Start the physics engine in GUI mode
-    p.connect(p.DIRECT)
-    # p.connect(p.GUI)
     
-    # Let it settle
-    hz = 240.0
-    tstep = 1.0 / hz
-    tsim = 2.0
-    nsteps = int(tsim / tstep)
-    p.setRealTimeSimulation(0)          # Turn off real-time mode
-    p.setTimeStep(tstep)
+    # Configuration parameters
+    support_gap = 0.01  # mm gap between specimen and supports
+    anvil_gap = 0.01    # mm gap between specimen and anvil
+    support_radius = 5.0  # mm - radius of support cylinders
     
-    # Configure PyBullet visualization
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())
-    p.setGravity(0, 0, -9.81)
-    p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
-    p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
-    # p.resetDebugVisualizerCamera(
-    #     cameraDistance=0.3,
-    #     cameraYaw=0,
-    #     cameraPitch=-40,
-    #     cameraTargetPosition=[0, 0, 0]
-    # )
-    p.setPhysicsEngineParameter(
-        numSolverIterations=100,
-        numSubSteps=4
-    )
-
+    # Iterate through df_test_data and create the necessary multibody STL files for simulation
     for index, row in df_test_data.iterrows():
-        if index > 0:
-            continue
-        filename = row["filename"]
+        filename = row["Quad Mesh File"]
         stl_filepath = os.path.join(aligned_meshes_folder, filename)
         
-        # Fix normals and export to a temporary file
-        fixed_stl_filepath = os.path.join(aligned_meshes_folder, f"fixed_{filename}")
-        fix_normals(stl_filepath, fixed_stl_filepath)
+        print(f"\nProcessing {filename}...")
         
-        stl_filepath = fixed_stl_filepath
+        # Load specimen
+        flex_mesh = load_flexural_specimen(stl_filepath)
         
-        mesh_scale = 1
+        # IMPROVED PLACEMENT: Use new function instead of simple positioning
+        flex_mesh = improve_specimen_placement(
+            flex_mesh, 
+            l_pos=row["L_Edge_Specimen_X"],
+            l_support_x=row["L_Support_X"],
+            r_support_x=row["R_Support_X"],
+            support_radius=support_radius,
+            gap_offset=support_gap
+        )
         
-        # Load STL with corrected normals
-        specimen_col = p.createCollisionShape(p.GEOM_MESH, fileName=fixed_stl_filepath, meshScale=mesh_scale)
-        specimen_vis = p.createVisualShape(p.GEOM_MESH, fileName=fixed_stl_filepath, meshScale=mesh_scale)
+        flex_mesh = ensure_normals_outward(flex_mesh, mesh_name="flex_mesh")
         
-        # Create support cylinders
-        cylinder_shape = p.createCollisionShape(shapeType=p.GEOM_CYLINDER, radius=5, height=50, meshScale=0.001)
-        cylinder_visual = p.createVisualShape(shapeType=p.GEOM_CYLINDER, radius=5, length=50, meshScale=0.001)
+        # Create anvil and supports using local surface heights (not bounding box extremes)
+        # Anvil positioned at specimen center (X=0) by default
+        anvil_x = 0.0  # Could be made configurable if needed
+        anvil = create_anvil(flex_mesh, anvil_x, anvil_gap)
         
         l_support_x = row["L_Support_X"]
         r_support_x = row["R_Support_X"]
-        rot_x_90 = p.getQuaternionFromEuler([math.pi / 2, 0, 0])
+        l_support, r_support = create_supports(flex_mesh, l_support_x, r_support_x, support_gap)
         
-        l_support = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=cylinder_shape,
-            baseVisualShapeIndex=cylinder_visual,
-            basePosition=[l_support_x, 0, -5],
-            baseOrientation=rot_x_90
-        )
-        
-        r_support = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=cylinder_shape,
-            baseVisualShapeIndex=cylinder_visual,
-            basePosition=[r_support_x, 0, -5],
-            baseOrientation=rot_x_90
-        )
-        
-        # Load STL mesh
-        scale = 1
-        mesh_scale = [scale, scale, scale]  # Adjust if mesh too large/small or invisible
-        # specimen_col = p.createCollisionShape(p.GEOM_MESH, fileName=stl_filepath, meshScale=mesh_scale)
-        specimen_col = p.createCollisionShape(
-            p.GEOM_MESH,
-            fileName=stl_filepath,
-            meshScale=[1, 1, 1],
-            flags=p.GEOM_FORCE_CONCAVE_TRIMESH
-        )
-        specimen_vis = p.createVisualShape(p.GEOM_MESH, fileName=stl_filepath, meshScale=mesh_scale)
-        print(f"\nProcessing: {filename}")
-        print("Collision Shape ID:", specimen_col)
-        print("Visual Shape ID:", specimen_vis)
+        # Ensure outward normals for cylinder bodies
+        anvil = ensure_normals_outward(anvil, mesh_name="anvil")
+        l_support = ensure_normals_outward(l_support, mesh_name="left_support")
+        r_support = ensure_normals_outward(r_support, mesh_name="right_support")
 
-        if specimen_col < 0 or specimen_vis < 0:
-            print("⚠️ Failed to load mesh:", stl_filepath)
-            continue
-
-        # Temporarily create to get dimensions
-        temp_id = p.createMultiBody(
-            baseMass=100.0,
-            baseCollisionShapeIndex=specimen_col,
-            baseVisualShapeIndex=specimen_vis,
-            basePosition=[0, 0, 5]
-        )
+        # Combine meshes
+        all_meshes = [flex_mesh, anvil, l_support, r_support]
+        merged_mesh = trimesh.util.concatenate(all_meshes)
         
-        # Get AABB and calculate height in Y direction
-        aabb_min, aabb_max = p.getAABB(temp_id)
-        height_y = aabb_max[1] - aabb_min[1]
-        shift_y = height_y / 2.0
+        # Generate output filename
+        base_name = os.path.splitext(filename)[0]
+        base_name = base_name.replace("_positive","").replace("_negative","").replace("_quad","")
+        output_filename = f"{base_name}_Test{row['Test_Num']}{os.path.splitext(filename)[1]}"
+        output_filepath = os.path.join(prepared_meshes_folder, output_filename)
+        merged_mesh.export(output_filepath)
         
-        # Remove temp body
-        p.removeBody(temp_id)
+        # Save the job name and add it to test_data.xlsx
+        job_name = base_name.replace("_quad","") + f"_Test{row['Test_Num']}"
+        df_test_data.loc[index, "Job Name"] = job_name
         
-        # Now create the actual specimen, shifted in +Y
-        specimen = p.createMultiBody(
-            baseMass=100000.0,
-            baseCollisionShapeIndex=specimen_col,
-            baseVisualShapeIndex=specimen_vis,
-            basePosition=[row["L_Edge_Specimen_X"], shift_y, 0.5],
-        )
+        # Save the test specific mesh file name and add it to test_data.xlsx
+        df_test_data.loc[index, "Test Specific Mesh File"] = output_filepath
         
-        # # Create a dummy anchor
-        # anchor = p.createMultiBody(
-        #     baseMass=0,
-        #     baseCollisionShapeIndex=-1,
-        #     baseVisualShapeIndex=-1,
-        #     basePosition=[desired_x_position, 0, 10],
-        #     useMaximalCoordinates=True
-        # )
+        print(f"{output_filename} complete")
         
-        for body_id in [specimen, l_support, r_support]:
-            p.changeDynamics(body_id, -1,
-                restitution=0.0,
-                linearDamping=0.05,
-                angularDamping=0.05,
-                lateralFriction=0.3,
-                contactStiffness=1e10,      # Optional: more compliant contact
-                contactDamping=10000         # Optional: adds energy loss
-            )
-        
-        yaw = 0
-        p.resetDebugVisualizerCamera(
-            cameraDistance=50,
-            cameraYaw=yaw,
-            cameraPitch=-2,
-            cameraTargetPosition=[0, 0, 0]
-        )
-        
-        # Optional: Add constraint logic here if you want the model aligned
-        
-        min_L_vals = []
-        min_R_vals = []
-        specimen_L_x = []
-        
-        # Before your simulation loop
-        initial_pos, _ = p.getBasePositionAndOrientation(specimen)
-        desired_x = initial_pos[0]
-        k = 10000000  # spring constant, adjust for your simulation stiffness
-        
-        for t in range(nsteps):
-            p.stepSimulation()
-            
-            # Get current specimen position
-            pos, _ = p.getBasePositionAndOrientation(specimen)
-            error_x = desired_x - pos[0]
-            
-            # Calculate corrective force along X
-            force_x = k * error_x
-            
-            # Apply external force at specimen's center of mass (linkIndex = -1)
-            p.applyExternalForce(objectUniqueId=specimen,
-                                 linkIndex=-1,
-                                 forceObj=[force_x, 0, 0],
-                                 posObj=pos,
-                                 flags=p.WORLD_FRAME)
-            
-            aabb_min, aabb_max = p.getAABB(specimen)
-            min_x = aabb_min[0]
-            specimen_L_x.append(min_x)
-            
-            # Support contacts
-            L_contacts = p.getClosestPoints(bodyA=l_support, bodyB=specimen, distance=0.5)
-            R_contacts = p.getClosestPoints(bodyA=r_support, bodyB=specimen, distance=0.5)
-            if L_contacts:
-                L_contactDistances = [L_contacts[i][8] for i in range(len(L_contacts))]
-                min_L = min(L_contactDistances)
-            else:
-                min_L = np.nan
-                
-            if R_contacts:
-                R_contactDistances = [R_contacts[i][8] for i in range(len(R_contacts))]
-                min_R = min(R_contactDistances)
-            else:
-                min_R = np.nan
-                
-            min_L_vals.append(min_L)
-            min_R_vals.append(min_R)
-                
-            # if (not np.isnan(min_L)) or (not np.isnan(min_R)):
-            #     # Print with fixed column widths:
-            #     # Left column width: 12 chars, right column width: 12 chars, right-aligned
-            #     # Show 'N/A' if None
-            #     print(f"L: {min_L if min_L is not None else 'N/A':>8}    R: {min_R if min_R is not None else 'N/A':>8}")
-                
-            
-                
-            time.sleep(tstep)
-        
-        # Print final pose
-        final_pos, final_orn = p.getBasePositionAndOrientation(specimen)
-        print("Final position:", final_pos)
-        
-        print(f"\nClosest L contact: {np.nanmin(min_L_vals)}")
-        print(f"Closest R contact: {np.nanmin(min_R_vals)}")
-        
-        plt.figure(dpi=300)
-        plt.plot(np.asarray(specimen_L_x)-desired_x)
-
+    # Export changed dataframe
+    df_test_data.to_excel(test_data_filepath, index=False)
+    print(f"\n\nProcessed {len(df_test_data)} specimens with improved placement.")
 
 if __name__ == "__main__":
     test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
