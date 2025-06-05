@@ -31,17 +31,6 @@ def list_jobs():
     result = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     return [obj['Key'] for obj in result.get('Contents', []) if obj['Key'].endswith('.yaml')]
 
-# def claim_job(job_key):
-#     # Implement a claim system (e.g., upload 'in_progress' marker)
-#     try:
-#         lock_key = job_key.replace('.yaml', '.lock')
-#         s3.get_object(Bucket=bucket, Key=lock_key)
-#         return False  # Already claimed
-#     except:
-#         s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
-#         return True
-
-
 def claim_job(job_key):
     lock_key = job_key.replace('.yaml', '.lock')
     try:
@@ -120,11 +109,11 @@ def process_job(job_key):
         if fname.endswith(extensions):
             print(f"\tFile '{fname}' will be uploaded to S3")
     #     if fname.endswith('.result') or fname.endswith('.log') or fname.startswith('results'):
-    #         s3.upload_file(
-    #             os.path.join(results_directory, fname),
-    #             bucket,
-    #             f'{job_folder}/{fname}'
-    #         )
+            s3.upload_file(
+                os.path.join(results_directory, fname),
+                bucket,
+                f'{job_folder}/{fname}'
+            )
     
 def terminate_instance():
     try:
@@ -140,6 +129,22 @@ def terminate_instance():
         time.sleep(30)
     except Exception as e:
         print(f"Error terminating instance: {e}")
+        
+def stop_instance():
+    try:
+        # Get instance ID from metadata
+        response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
+        instance_id = response.text
+        print(f"Stopping instance: {instance_id}")
+        
+        ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2'))
+        ec2.stop_instances(InstanceIds=[instance_id])
+        
+        # Sleep to allow shutdown
+        time.sleep(30)
+    except Exception as e:
+        print(f"Error stopping instance: {e}")
+
 
 
 for job_key in list_jobs():
@@ -149,4 +154,5 @@ for job_key in list_jobs():
         break  # Stop after one job; instance shuts down or can loop
         
 print("All results uploaded. Initiating shutdown...")
+stop_instance()
 # terminate_instance()
