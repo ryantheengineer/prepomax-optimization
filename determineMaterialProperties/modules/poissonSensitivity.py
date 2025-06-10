@@ -114,10 +114,12 @@ def estimate_preload_displacement(target_stl):
 
 def perform_poisson_sensitivity_study(poisson_values, yaml_file):
     moduli = []
-    for poisson in poisson_values:
+    for poisson in list(poisson_values):
+        
+        print(f"\nRunning test with Poisson ratio {poisson}")
         # Load yaml config file
         data = load_yaml(yaml_file)
-        data['poisson'] = poisson
+        data['poisson'] = float(poisson)
         save_yaml(data, yaml_file)
         
         results_directory = data['results_directory']
