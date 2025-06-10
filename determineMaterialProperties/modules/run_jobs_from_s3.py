@@ -104,7 +104,7 @@ def process_job(job_key):
     
     # Upload results back to the job folder
     print("This is where the results will be uploaded back to S3")
-    extensions = (".png", ".result", ".log", ".dat")
+    extensions = (".png", ".result", ".log", ".dat", ".frd", ".txt", ".inp")
     for fname in os.listdir(results_directory):
         if fname.endswith(extensions):
             print(f"\tFile '{fname}' will be uploaded to S3")
