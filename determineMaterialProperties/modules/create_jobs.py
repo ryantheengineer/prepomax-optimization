@@ -20,14 +20,14 @@ import yaml
 
 def create_jobs(poisson):
     # PCA align the raw scan meshes
-    raw_scans_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans"
-    aligned_scans_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
+    raw_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans"
+    aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
     
     print("\nProcessing raw scans - aligning them with PCA")
     process_scans(raw_scans_folder, aligned_scans_folder)
     
     # Quad remesh
-    quad_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    quad_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
     blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
     quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
     # quad_remesh_aligned_meshes(aligned_scans_folder, quad_meshes_folder)
@@ -45,15 +45,15 @@ def create_jobs(poisson):
     input("\nPress ENTER when test_data.xlsx has been updated...")
     
     # Create test-specific mesh files based on real test data
-    test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
-    prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
+    test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
     print("\nCreating test-specific mesh files based on real test data")
     create_models(test_data_filepath, quad_meshes_folder, prepared_meshes_folder)
     
     # Create job folders with YAML config files and the test-specific meshes
     print("\nCreating job folders and necessary files")
-    jobs_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/7 - Jobs"
+    jobs_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/7 - Jobs"
     df_test_data = pd.read_excel(test_data_filepath)
     os.makedirs(jobs_folder, exist_ok=True)
     
@@ -77,7 +77,7 @@ def create_jobs(poisson):
                   'displacement': row["Displacement (mm)"],
                   'results_directory': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/output',
                   'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
-                  'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacementv2.pmx',
+                  'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacement_v2.pmx',
                   'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/base_geometry.stl',
                   'geo_target_file': f'C:/tmp/job/{os.path.basename(test_mesh)}',
                   'target_stiffness': target_stiffness,
