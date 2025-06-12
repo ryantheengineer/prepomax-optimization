@@ -14,24 +14,12 @@ from pathlib import Path
 import requests
 import time
 
-s3 = boto3.client('s3')
 
-with open('s3_config.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-    
-bucket = config['bucket']
-prefix = config['prefix']
-
-print("")
-print("#"*60)
-print(f"Bucket:\t{bucket}")
-print(f"Prefix:\t{prefix}")
-
-def list_jobs():
+def list_jobs(s3, bucket, prefix):
     result = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     return [obj['Key'] for obj in result.get('Contents', []) if obj['Key'].endswith('.yaml')]
 
-def claim_job(job_key):
+def claim_job(job_key, s3, bucket):
     lock_key = job_key.replace('.yaml', '.lock')
     try:
         # Try to fetch the lock object
@@ -47,7 +35,7 @@ def claim_job(job_key):
             # Some other error occurred
             raise
 
-def process_job(job_key):
+def process_job(job_key, s3, bucket):
     # Download YAML and related files
     print("Downloading YAML and related files...")
     job_folder = os.path.dirname(job_key)
@@ -115,7 +103,7 @@ def process_job(job_key):
                 f'{job_folder}/{fname}'
             )
     
-def terminate_instance():
+def terminate_instance(config):
     try:
         # Get instance ID from metadata
         response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
@@ -130,7 +118,7 @@ def terminate_instance():
     except Exception as e:
         print(f"Error terminating instance: {e}")
         
-def stop_instance():
+def stop_instance(config):
     try:
         # Get instance ID from metadata
         response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
@@ -146,13 +134,29 @@ def stop_instance():
         print(f"Error stopping instance: {e}")
 
 
-
-for job_key in list_jobs():
-    print(f"Current job key:\t{job_key}")
-    if claim_job(job_key):
-        process_job(job_key)
-        break  # Stop after one job; instance shuts down or can loop
+def main_process():
+    s3 = boto3.client('s3')
+    
+    with open('s3_config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
         
-print("All results uploaded. Initiating shutdown...")
-stop_instance()
-# terminate_instance()
+    bucket = config['bucket']
+    prefix = config['prefix']
+    
+    print("")
+    print("#"*60)
+    print(f"Bucket:\t{bucket}")
+    print(f"Prefix:\t{prefix}")
+    
+    for job_key in list_jobs(s3, bucket, prefix):
+        print(f"Current job key:\t{job_key}")
+        if claim_job(job_key, s3, bucket):
+            process_job(job_key, s3, bucket)
+            break  # Stop after one job; instance shuts down or can loop
+            
+    print("All results uploaded. Initiating shutdown...")
+    stop_instance(config)
+    # terminate_instance(config)
+    
+if __name__ == "__main__":
+    main_process()
