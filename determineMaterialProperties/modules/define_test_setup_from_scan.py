@@ -575,13 +575,18 @@ def detect_planes(target_axis=[1, 0, 0], angle_deg=3, distance_threshold=0.1, ra
     # Align the point cloud with PCA
     pcd = align_point_cloud_with_pca(base_pcd)
     
+    # Rotate the point cloud about X so the greatest variation aligns with Z
+    rotation_angle = np.radians(90)
+    axis_angle = np.array([rotation_angle, 0, 0])
+    rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+    pcd.rotate(rotation_matrix, center=(0,0,0))    
+    
     target_axis = np.array(target_axis)
     # x_axis = np.array([1, 0, 0])
     angle_rad = np.radians(angle_deg)
     cos_angle_thresh = np.cos(angle_rad)
     planes = []
     plane_meshes = []
-    inlier_clouds = []
 
     pcd_copy = pcd.select_by_index([], invert=True)  # clone for modification
 
@@ -630,12 +635,41 @@ def detect_planes(target_axis=[1, 0, 0], angle_deg=3, distance_threshold=0.1, ra
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
     o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
 
-    return planes, inlier_clouds
+    return pcd, filtered_planes, retained_idxs, plane_meshes, inlier_cloud
+
+def detect_fixture_planes(target_axes):
+    keep_planes = []
+    for target_axis in target_axes:
+        pcd, filtered_planes, retained_idxs, plane_meshes, inlier_cloud = detect_planes(target_axis=target_axis)
+        
+        # Base of fixture
+        if target_axis == [0, 0, 1]:
+            base_plane = max(filtered_planes, key=lambda x: x[3]) # Select the maximum d value (the more positive d, the further below the origin)
+            keep_planes.append(base_plane)
+        else:
+            for plane in filtered_planes:
+                keep_planes.append(plane)
+                
+    time.sleep(2)
+    
+    # Combine all for visualization
+    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
+    
+    return keep_planes
+            
 
 if __name__ == "__main__":
     # find_cylinders()
     # target_axis = [np.sqrt(3)/2, -0.5, 0]   # One angled face of anvil
     # target_axis = [-np.sqrt(3)/2, -0.5, 0]  # Other angled face of anvil
     # target_axis = [1, 0, 0]     # X axis
-    target_axis = [0, 1, 0]     # Y axis
-    planes, inlier_clouds = detect_planes(target_axis=target_axis)
+    # target_axis = [0, 0, 1]     # Z axis
+    # planes, inlier_clouds = detect_planes(target_axis=target_axis)
+    
+    target_axes = [[0, 0, 1],
+                   [1, 0, 0],
+                   [np.sqrt(3)/2, 0, -0.5],
+                   [-np.sqrt(3)/2, 0, -0.5]]
+    
+    keep_planes = detect_fixture_planes(target_axes)
