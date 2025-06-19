@@ -673,3 +673,27 @@ if __name__ == "__main__":
                    [-np.sqrt(3)/2, 0, -0.5]]
     
     keep_planes = detect_fixture_planes(target_axes)
+    
+    
+    
+    # NEXT STEPS:
+    # * Use the known relative angles and positions of the found datum planes
+    #   to adjust the found datum planes into perfect relative position, while
+    #   optimizing for the best fit of the scan data.
+    # * Use the datum planes to determine the location of the supports and
+    #   anvil. The anvil should be allowed to be at a slightly different angle
+    #   than the supports, but it should have its axis in a plane parallel to
+    #   the XY plane.
+    # * Adjust the entire point cloud and the fit cylinders so the fit supports
+    #   have identical Z coordinates and their axes are parallel to the XY plane.
+    #   Place one of the centers of a support at the origin. Since we are not
+    #   assuming that the anvil is parallel to the supports, we do not use this
+    #   as a locating feature as before.
+    # * Align the corresponding full specimen mesh to the scanned portion of
+    #   the specimen in the test setup scan.
+    # * Ensure there are no intersections between the specimen mesh and the
+    #   suppors or anvil meshes. Adjust positions in the Z axis if necessary,
+    #   but only by the minimum amount.
+    # * Export the aligned specimen, anvil, left support, and right support as
+    #   a new mesh.
+    
