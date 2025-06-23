@@ -9,7 +9,7 @@ from sklearn.decomposition import PCA
 # import matplotlib.pyplot as plt
 # import pyswarms as ps
 # import copy
-# from itertools import combinations
+from itertools import combinations
 import time
 
 def load_mesh_as_point_cloud(mesh_path):
@@ -542,30 +542,240 @@ def angular_change_between_normals(n_orig, n_opt):
     angle_deg = np.degrees(angle_rad)
     return angle_deg
 
-def identify_planes_along_x(keep_planes, keep_inlier_clouds):
+def identify_planes_along_x(planes, clouds):
     """
-    Identify and return sorted indices of keep_planes[1:5] from min to max real-world X.
-
-    Returns:
-        sorted_indices (list of int): Indices in keep_planes corresponding to sorted X position.
+    planes: list of plane coefficients
+    clouds: list of corresponding point clouds
+    
+    Returns indices of planes in order from min X to max X.
+    So returns 4 indices: outer_min, inner_min, inner_max, outer_max
     """
-    sub_planes = keep_planes[1:5]
-    sub_clouds = keep_inlier_clouds[1:5]
+    # Compute centroid X for each cloud
+    centroids = [np.mean(np.asarray(c.points), axis=0) for c in clouds]
+    x_coords = [c[0] for c in centroids]
+    
+    # Sort indices by X coordinate
+    sorted_indices = sorted(range(len(x_coords)), key=lambda i: x_coords[i])
+    
+    # Return all four sorted indices
+    return tuple(sorted_indices)  # will be 4 indices
 
-    x_axis = np.array([1, 0, 0])
-    centroids = [np.mean(np.asarray(cloud.points), axis=0) for cloud in sub_clouds]
 
-    # Project each centroid onto X axis
-    projected_x = [np.dot(centroid, x_axis) for centroid in centroids]
 
-    # Get original indices from keep_planes
-    original_indices = list(range(1, 5))
+###############################################################################
+# OPTIMIZE FOR ALL CONSTRAINTS
 
-    # Sort based on projected X values
-    sorted_tuples = sorted(zip(original_indices, projected_x), key=lambda t: t[1])
-    sorted_indices = [idx for idx, _ in sorted_tuples]
+def normalize(v):
+    return v / np.linalg.norm(v)
 
-    return sorted_indices
+
+def residual_loss(flat_params, inlier_clouds):
+    loss = 0.0
+    for i in range(len(inlier_clouds)):
+        n = normalize(flat_params[i * 4:i * 4 + 3])
+        d = flat_params[i * 4 + 3]
+        pts = np.asarray(inlier_clouds[i].points)
+        distances = pts @ n + d
+        loss += np.sum(distances ** 2)
+    return loss
+
+
+def define_constraints():
+    cons = []
+
+    # Plane 0 orthogonal to planes 1 to 4
+    for i in range(1, 5):
+        cons.append({
+            'type': 'eq',
+            'fun': lambda x, i=i: np.dot(
+                normalize(x[0:3]), normalize(x[i * 4:i * 4 + 3])
+            )
+        })
+
+    # Planes 1 & 4 parallel: normals must match or be opposite
+    cons.append({
+        'type': 'eq',
+        'fun': lambda x: np.dot(
+            normalize(x[1 * 4:1 * 4 + 3]), normalize(x[4 * 4:4 * 4 + 3])
+        ) - 1
+    })
+
+    # Planes 2 & 3 parallel
+    cons.append({
+        'type': 'eq',
+        'fun': lambda x: np.dot(
+            normalize(x[2 * 4:2 * 4 + 3]), normalize(x[3 * 4:3 * 4 + 3])
+        ) - 1
+    })
+
+    # Planes 5 and 6: 60 degree angle between normals
+    target_angle_rad = np.radians(60)
+    target_dot = np.cos(target_angle_rad)
+    cons.append({
+        'type': 'eq',
+        'fun': lambda x: np.dot(
+            normalize(x[5 * 4:5 * 4 + 3]), normalize(x[6 * 4:6 * 4 + 3])
+        ) - target_dot
+    })
+
+    # Line of intersection of planes 5 and 6 should be parallel to inner planes 2 & 3 (in XY only)
+    def intersection_dir(x):
+        n5 = normalize(x[5 * 4:5 * 4 + 3])
+        n6 = normalize(x[6 * 4:6 * 4 + 3])
+        direction = normalize(np.cross(n5, n6))
+        return direction
+
+    def dir_xy_parallel(x):
+        d = intersection_dir(x)
+        n2 = normalize(x[2 * 4:2 * 4 + 3])
+        return np.dot(d[:2], n2[:2])
+
+    cons.append({
+        'type': 'eq',
+        'fun': dir_xy_parallel
+    })
+
+    # Intersection line should have zero Z component
+    cons.append({
+        'type': 'eq',
+        'fun': lambda x: intersection_dir(x)[2]
+    })
+
+    # Unit norm constraint for each plane normal
+    for i in range(7):
+        cons.append({
+            'type': 'eq',
+            'fun': lambda x, i=i: np.linalg.norm(x[i * 4:i * 4 + 3]) - 1
+        })
+
+    return cons
+
+
+def optimize_all_planes(keep_planes, keep_inlier_clouds):
+    """
+    Optimize planes with the following constraints:
+    - keep_planes[0] orthogonal to keep_planes[1:5]
+    - Among keep_planes[1:5], identify outer and inner pairs along X:
+       * outer two planes parallel
+       * inner two planes parallel
+    - keep_planes[5] and keep_planes[6] have 60 degrees separation
+    - Intersection line of planes 5 & 6 is parallel to the inner pair and has zero Z component
+    """
+
+    # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(
+        keep_planes[1:5], keep_inlier_clouds[1:5]
+    )
+    # Map these local indices to global indices in keep_planes
+    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+
+    # Flatten all planes into parameters for optimization
+    flat_params = np.hstack(keep_planes)
+
+    def constraint_func(params):
+        n_planes = len(params) // 4
+        planes = [params[i*4:(i+1)*4] for i in range(n_planes)]
+
+        constraints = []
+
+        # 1) keep_planes[0] orthogonal to all planes in keep_planes[1:5]
+        base_plane = planes[0]
+        for idx in x_plane_indices:
+            n_base = base_plane[:3] / np.linalg.norm(base_plane[:3])
+            n_other = planes[idx][:3] / np.linalg.norm(planes[idx][:3])
+            # Dot product should be zero for orthogonality
+            constraints.append(np.dot(n_base, n_other))
+
+        # 2) Outer pair of keep_planes[1:5] parallel
+        l_support = planes[x_plane_indices[0]][:3] / np.linalg.norm(planes[x_plane_indices[0]][:3])
+        r_support = planes[x_plane_indices[3]][:3] / np.linalg.norm(planes[x_plane_indices[3]][:3])
+        constraints.append(np.dot(l_support, r_support) - 1)  # parallel means dot == ±1, use +1 here and consider orientation fix if needed
+
+        # 3) Inner pair of keep_planes[1:5] parallel
+        l_anvil = planes[x_plane_indices[1]][:3] / np.linalg.norm(planes[x_plane_indices[1]][:3])
+        r_anvil = planes[x_plane_indices[2]][:3] / np.linalg.norm(planes[x_plane_indices[2]][:3])
+        constraints.append(np.dot(l_anvil, r_anvil) - 1)
+
+        # 4) keep_planes[5] and keep_planes[6] separated by 60 degrees
+        n5 = planes[5][:3] / np.linalg.norm(planes[5][:3])
+        n6 = planes[6][:3] / np.linalg.norm(planes[6][:3])
+        cos_60 = np.cos(np.radians(60))
+        constraints.append(np.dot(n5, n6) - cos_60)
+        
+        # 5) Ensure sides of anvil and angled faces of anvil are 150 degrees apart
+        cos_150 = np.cos(np.radians(150))
+        constraints.append(np.dot(n5, l_anvil) - np.abs(cos_150))
+        constraints.append(np.dot(n6, r_anvil) - np.abs(cos_150))
+
+        # # 5) Intersection line of planes 5 & 6 parallel to inner pair, with zero Z component
+        # # Intersection line direction = cross product of normals n5 x n6
+        # line_dir = np.cross(n5, n6)
+        # line_dir /= np.linalg.norm(line_dir)
+
+        # # Enforce zero Z component of intersection line
+        # constraints.append(line_dir[2])  # line_dir.z == 0
+
+        # # Enforce parallelism of intersection line to inner pair normal directions
+        # # Use the average normal of the inner pair for reference direction
+        # inner_avg = (n_inner1 + n_inner2) / 2
+        # inner_avg /= np.linalg.norm(inner_avg)
+
+        # # Dot product should be ±1 (parallel)
+        # dot_line_inner = np.abs(np.dot(line_dir, inner_avg)) - 1
+        # constraints.append(dot_line_inner)
+
+        # 6) Each plane normal must be unit length
+        for plane in planes:
+            constraints.append(np.linalg.norm(plane[:3]) - 1)
+
+        return np.array(constraints)
+
+    # Define objective function: sum of squared residuals of points to their respective planes
+    def objective_func(params):
+        n_planes = len(params) // 4
+        planes = [params[i*4:(i+1)*4] for i in range(n_planes)]
+        loss = 0.0
+        for i, plane in enumerate(planes):
+            n = plane[:3]
+            n /= np.linalg.norm(n)
+            d = plane[3]
+            pts = np.asarray(keep_inlier_clouds[i].points)
+            res = pts @ n + d
+            loss += np.sum(res**2)
+        return loss
+
+    cons = [{'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]} for i in range(9 + len(keep_planes))]
+
+    result = minimize(
+        objective_func,
+        flat_params,
+        method='SLSQP',
+        constraints=cons,
+        options={'maxiter': 500,
+                 'disp': True,
+                 'ftol': 1e-10}
+    )
+
+    if not result.success:
+        print("Optimization failed:", result.message)
+
+    optimized_planes = [result.x[i*4:(i+1)*4] for i in range(len(keep_planes))]
+    
+    # After optimization, create plane meshes for visualization
+    optimized_plane_meshes = []
+    for plane, cloud in zip(optimized_planes, keep_inlier_clouds):
+        mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
+        optimized_plane_meshes.append(mesh)
+
+    # Create coordinate frame
+    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0,0,0])
+
+    # Visualize optimized planes and the inlier clouds used for fitting
+    o3d.visualization.draw_geometries(keep_inlier_clouds + [axis] + optimized_plane_meshes, window_name="Optimized Planes")
+
+    return optimized_planes, x_plane_indices
+
+
 
 if __name__ == "__main__":
     mesh_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3_point_bend_flat_surfaces.stl"
@@ -579,43 +789,91 @@ if __name__ == "__main__":
     
     keep_planes, keep_inlier_clouds, aligned_pcd = detect_fixture_planes(base_pcd, target_axes)
     
-    o3d.visualization.draw_geometries([aligned_pcd] + keep_inlier_clouds, window_name='Keep Inlier Clouds')
+    # o3d.visualization.draw_geometries([aligned_pcd] + keep_inlier_clouds, window_name='Keep Inlier Clouds')
     
-    # Identify the X-aligned planes
-    sorted_idxs = identify_planes_along_x(keep_planes, keep_inlier_clouds)
-    print("Planes sorted along X (min to max):", sorted_idxs)
-    sorted_planes = [keep_planes[i] for i in sorted_idxs]
-    sorted_clouds = [keep_inlier_clouds[i] for i in sorted_idxs]
+    optimized_planes, x_plane_indices = optimize_all_planes(keep_planes, keep_inlier_clouds)
+    
+    # o3d.visualization.draw_geometries([aligned_pcd] + optimized_planes, window_name='Optimized_Planes')
+    
+    # Verification of constraints
+    print("")
+    for combo in combinations(range(len(optimized_planes)), 2):
+        n1 = optimized_planes[combo[0]][:3]
+        n2 = optimized_planes[combo[1]][:3]
+        angle_diff = angular_change_between_normals(n1, n2)
+        
+        # Check if the current combo contains X-oriented planes
+        set_combo = set(combo)
+        set_x_plane_indices = set(x_plane_indices)
+        
+        common_elements = list(set_combo.intersection(set_x_plane_indices))
+        
+        labels = []
+        for ele in common_elements:
+            x_plane_pos = x_plane_indices.index(ele)
+            if x_plane_pos == 0:
+                labels.append("Left Support")
+            elif x_plane_pos == 1:
+                labels.append("Left Side Anvil")
+            elif x_plane_pos == 2:
+                labels.append("Right Side Anvil")
+            elif x_plane_pos == 3:
+                labels.append("Right Support")
+            else:
+                raise ValueError("Index out of range")
+            
+        if len(common_elements) == 2:
+            print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} ({labels[1]}) are separated by {angle_diff:.4f} degrees')
+        elif len(common_elements) == 1:
+            if combo[0] in common_elements:
+                print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} are separated by {angle_diff:.4f} degrees')
+            else:
+                print(f'Planes {combo[0]} and {combo[1]} ({labels[0]}) are separated by {angle_diff:.4f} degrees')                
+        else:
+            print(f'Planes {combo[0]} and {combo[1]} are separated by {angle_diff:.4f} degrees')
+    
+    
+    # # Identify the X-aligned planes
+    # sorted_idxs = identify_planes_along_x(keep_planes, keep_inlier_clouds)
+    # print("Planes sorted along X (min to max):", sorted_idxs)
+    # sorted_planes = [keep_planes[i] for i in sorted_idxs]
+    # sorted_clouds = [keep_inlier_clouds[i] for i in sorted_idxs]
     
     
     
-    print("\nOptimizing parallel planes for keep_planes[5] and keep_planes[6]...\n")
+    # print("\nOptimizing parallel planes for keep_planes[5] and keep_planes[6]...\n")
     
-    p5_opt, p6_opt = optimize_planes_with_fixed_angle(
-        keep_planes[5], keep_planes[6],
-        keep_inlier_clouds[5], keep_inlier_clouds[6],
-        target_angle_deg=60
-    )
+    # p5_opt, p6_opt = optimize_planes_with_fixed_angle(
+    #     keep_planes[5], keep_planes[6],
+    #     keep_inlier_clouds[5], keep_inlier_clouds[6],
+    #     target_angle_deg=60
+    # )
     
-    optimized_plane_meshes = [
-        create_plane_mesh(p5_opt, keep_inlier_clouds[5], plane_size=50.0),
-        create_plane_mesh(p6_opt, keep_inlier_clouds[6], plane_size=50.0)
-    ]
+    # optimized_plane_meshes = [
+    #     create_plane_mesh(p5_opt, keep_inlier_clouds[5], plane_size=50.0),
+    #     create_plane_mesh(p6_opt, keep_inlier_clouds[6], plane_size=50.0)
+    # ]
     
-    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
-    o3d.visualization.draw_geometries(
-        [aligned_pcd, axis] + optimized_plane_meshes,
-        window_name="Optimized Parallel Planes"
-    )
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    # o3d.visualization.draw_geometries(
+    #     [aligned_pcd, axis] + optimized_plane_meshes,
+    #     window_name="Optimized Parallel Planes"
+    # )
 
-    orig_n1 = keep_planes[5][:3]
-    orig_n2 = keep_planes[6][:3]
+    # orig_n1 = keep_planes[5][:3]
+    # orig_n2 = keep_planes[6][:3]
     
-    angle_change1 = angular_change_between_normals(orig_n1, p5_opt[:3])
-    angle_change2 = angular_change_between_normals(orig_n2, p6_opt[:3])
+    # angle_change1 = angular_change_between_normals(orig_n1, p5_opt[:3])
+    # angle_change2 = angular_change_between_normals(orig_n2, p6_opt[:3])
     
-    print(f"Plane 5 normal changed by {angle_change1:.2f} degrees")
-    print(f"Plane 6 normal changed by {angle_change2:.2f} degrees")
+    # print(f"Plane 5 normal changed by {angle_change1:.2f} degrees")
+    # print(f"Plane 6 normal changed by {angle_change2:.2f} degrees")
+    
+    
+    
+    
+    
+    
     
     # residuals = check_plane_point_residuals(keep_planes, keep_inlier_clouds, threshold=0.1)
     
