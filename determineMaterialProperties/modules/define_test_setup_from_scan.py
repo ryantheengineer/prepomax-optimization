@@ -3,10 +3,12 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
 from sklearn.decomposition import PCA
+from sklearn.cluster import DBSCAN
 from itertools import combinations
 import time
 import trimesh
-from align_meshes import align_tgt_mesh_to_ref_pcd, load_mesh
+from align_meshes import align_tgt_to_ref_meshes, load_mesh
+import copy
 
 def load_mesh_as_point_cloud(mesh_path):
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -55,6 +57,44 @@ def align_point_cloud_with_pca(pcd):
     # o3d.visualization.draw_geometries([pcd_pca], window_name="PCA Point Cloud")
     
     return pcd_pca
+
+def align_mesh_with_pca(mesh):
+    if not isinstance(mesh, o3d.geometry.TriangleMesh):
+        raise ValueError("Input must be an Open3D TriangleMesh.")
+
+    # Convert vertices to numpy array
+    vertices = np.asarray(mesh.vertices)
+
+    # Center the mesh at the origin
+    centroid = np.mean(vertices, axis=0)
+    centered_vertices = vertices - centroid
+
+    # Perform PCA
+    pca = PCA(n_components=3)
+    pca.fit(centered_vertices)
+    axes = pca.components_
+
+    # Sort axes by explained variance (descending)
+    order = np.argsort(pca.explained_variance_)[::-1]
+    ordered_axes = axes[order]
+
+    # Align principal components with +X, +Y, +Z
+    target_axes = np.eye(3)
+    rotation_matrix = ordered_axes.T @ target_axes
+
+    # Apply rotation
+    rotated_vertices = centered_vertices @ rotation_matrix
+
+    # Create a new mesh with rotated vertices and same faces
+    aligned_mesh = o3d.geometry.TriangleMesh()
+    aligned_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
+    aligned_mesh.triangles = mesh.triangles
+
+    # Recompute normals since geometry has changed
+    aligned_mesh.compute_vertex_normals()
+
+    return aligned_mesh
+
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
     # Create a square plane oriented by the plane normal
@@ -160,32 +200,66 @@ def plane_similarity(plane1, plane2):
 
     return normal_diff + d_diff  # Lower = more similar
 
-def filter_duplicate_planes(planes, target_axis):
+# def filter_duplicate_planes(planes, target_axis):
+#     planes = np.array(planes)
+#     n = len(planes)
+#     used = [False] * n
+#     keep = []
+
+#     for i in range(n):
+#         if used[i]:
+#             continue
+#         current_group = [i]
+#         for j in range(i + 1, n):
+#             if used[j]:
+#                 continue
+#             sim = plane_similarity(planes[i], planes[j])
+#             # We find the closest neighbor based on similarity
+#             if sim < 0.05:  # Very tight, not arbitrary — adjust if needed
+#                 current_group.append(j)
+
+#         # Select best-aligned with target_axis
+#         best_idx = max(
+#             current_group,
+#             key=lambda idx: abs(np.dot(planes[idx][:3] / np.linalg.norm(planes[idx][:3]), target_axis))
+#         )
+#         keep.append(planes[best_idx])
+#         for idx in current_group:
+#             used[idx] = True
+
+#     return keep
+
+def filter_duplicate_planes(planes, target_axis, d_threshold=1.0):
+    """
+    Filters out planes with similar 'd' values (i.e., close positions along their shared normal direction).
+    Uses DBSCAN to cluster by 'd' and picks the plane in each cluster whose normal is most aligned with target_axis.
+
+    Args:
+        planes: (N, 4) numpy array of plane definitions [a, b, c, d]
+        target_axis: list or np.array of shape (3,), the preferred alignment direction
+        d_threshold: float, max absolute difference in 'd' value for clustering (adjust as needed)
+
+    Returns:
+        List of filtered plane definitions (each is a 4-element numpy array)
+    """
     planes = np.array(planes)
-    n = len(planes)
-    used = [False] * n
+    normals = planes[:, :3]
+    d_values = planes[:, 3].reshape(-1, 1)
+
+    # Cluster based on the d value only
+    clustering = DBSCAN(eps=d_threshold, min_samples=1).fit(d_values)
+    labels = clustering.labels_
+
     keep = []
+    target_axis = np.array(target_axis) / np.linalg.norm(target_axis)
 
-    for i in range(n):
-        if used[i]:
-            continue
-        current_group = [i]
-        for j in range(i + 1, n):
-            if used[j]:
-                continue
-            sim = plane_similarity(planes[i], planes[j])
-            # We find the closest neighbor based on similarity
-            if sim < 0.05:  # Very tight, not arbitrary — adjust if needed
-                current_group.append(j)
-
-        # Select best-aligned with target_axis
+    for label in np.unique(labels):
+        cluster_indices = np.where(labels == label)[0]
         best_idx = max(
-            current_group,
-            key=lambda idx: abs(np.dot(planes[idx][:3] / np.linalg.norm(planes[idx][:3]), target_axis))
+            cluster_indices,
+            key=lambda idx: abs(np.dot(normals[idx] / np.linalg.norm(normals[idx]), target_axis))
         )
         keep.append(planes[best_idx])
-        for idx in current_group:
-            used[idx] = True
 
     return keep
 
@@ -240,6 +314,8 @@ def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_thresho
 
         # Remove inliers and continue
         pcd_copy = pcd_copy.select_by_index(inliers, invert=True)
+        
+    print(f'{len(planes)} planes detected for axis {target_axis}')
     
     filtered_planes, retained_idxs = filter_duplicate_planes_by_alignment(
         planes, axis=target_axis, angle_thresh_deg=5.0, dist_thresh=1.0
@@ -286,8 +362,12 @@ def detect_fixture_planes(base_pcd, target_axes):
                     tmp_clouds = []
         
                     if target_axis == [0, 0, 1]:
-                        base_plane = max(filtered_planes, key=lambda x: x[3])
-                        base_idx = filtered_planes.index(base_plane)
+                        # base_plane = max(filtered_planes, key=lambda x: x[3])
+                        # base_idx = filtered_planes.index(base_plane)
+                        
+                        base_idx = max(range(len(filtered_planes)), key=lambda i: filtered_planes[i][3])
+                        base_plane = filtered_planes[base_idx]
+                        
                         # original_idx = retained_idxs[base_idx]
         
                         tmp_planes.append(base_plane)
@@ -325,7 +405,8 @@ def detect_fixture_planes(base_pcd, target_axes):
                     print(f"[Attempt {attempt+1}/{max_retries}] Failed with error: {e}")
         
             if not success:
-                print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                # print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                raise Exception(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
                 
                 
         break
@@ -1215,6 +1296,59 @@ def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, plane
     
     return success, angle_error_X, angle_error_Z, total_angle
 
+# def generate_candidate_orientations(mesh, visualize=False, target_pcd=None):
+#     print("[INFO] Generating candidate 180° flips...")
+#     identities = {
+#         "Original": np.eye(3),
+#         "Flip Z": Rotation.from_euler('z', 180, degrees=True).as_matrix(),
+#         "Flip X": Rotation.from_euler('x', 180, degrees=True).as_matrix(),
+#         "Flip Z+X": Rotation.from_euler('zx', [180, 180], degrees=True).as_matrix()
+#     }
+
+#     candidates = []
+#     for name, rot in identities.items():
+#         m = copy.deepcopy(mesh)
+#         m.rotate(rot, center=(0, 0, 0))
+#         print(f"  - Candidate: {name}")
+#         if visualize and target_pcd:
+#             o3d.visualization.draw_geometries([
+#                 m.paint_uniform_color([1, 0, 0]),
+#                 target_pcd.paint_uniform_color([0, 1, 0]),
+#                 axis
+#             ], window_name=f"Candidate Orientation: {name}")
+#         candidates.append((m, name))
+#     return candidates
+
+def generate_candidate_orientations(mesh, visualize=False, target_pcd=None):
+    print("[INFO] Generating candidate 180° flips...")
+
+    # Define all required 180° rotations
+    rotations = {
+        "Original": np.eye(3),
+        "Flip Z": Rotation.from_euler('z', 180, degrees=True).as_matrix(),
+        "Flip X": Rotation.from_euler('x', 180, degrees=True).as_matrix(),
+        "Flip Z+X": Rotation.from_euler('x', 180, degrees=True).as_matrix() @ Rotation.from_euler('z', 180, degrees=True).as_matrix()
+    }
+
+    candidates = []
+    for name, rot in rotations.items():
+        m = copy.deepcopy(mesh)
+        m.rotate(rot, center=(0, 0, 0))
+        print(f"  - Candidate: {name}")
+        
+        if visualize and target_pcd is not None:
+            axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
+            m.paint_uniform_color([1, 0, 0])
+            target_pcd.paint_uniform_color([0, 1, 0])
+            o3d.visualization.draw_geometries(
+                [m, target_pcd, axis],
+                window_name=f"Candidate Orientation: {name}"
+            )
+        
+        candidates.append((m, name))
+
+    return candidates
+
 
 if __name__ == "__main__":
     mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
@@ -1296,11 +1430,81 @@ if __name__ == "__main__":
     )    
     
     
-    #### Align single scanned STL to the full test setup scan
-    # FIX: Need to scan the specific matching specimen
+    # # Apply the R rotation matrix to the original mesh
+    # test_mesh = load_mesh(mesh_path)
+    # test_mesh_rotated = test_mesh.rotate(R, center=(0,0,0))
+    
+    # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    # matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
+    
+    # aligned_specimen_mesh = align_tgt_to_ref_meshes(test_mesh_rotated, matched_specimen_mesh)
+    
+    # Load original mesh
+    original_mesh = load_mesh(mesh_path)
+    
+    # Get original mesh centroid for translation
+    original_vertices = np.asarray(original_mesh.vertices)
+    centroid = original_vertices.mean(axis=0)
+    
+    # Step 1: Translate to origin
+    translated_vertices = original_vertices - centroid
+    
+    # Step 2: Apply rotation matrix
+    rotated_vertices = translated_vertices @ R.T  # Open3D expects R.T for .rotate()
+    
+    # Step 3: Create transformed mesh
+    transformed_reference_mesh = o3d.geometry.TriangleMesh()
+    transformed_reference_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
+    transformed_reference_mesh.triangles = original_mesh.triangles
+    transformed_reference_mesh.compute_vertex_normals()
+    
+    # Optionally: Save or visualize it
+    # o3d.io.write_triangle_mesh("transformed_reference.stl", transformed_reference_mesh)
+    
+    # Load and align matched specimen
     matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
     matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
-    aligned_specimen_mesh = align_tgt_mesh_to_ref_pcd(rotated_pcd, matched_specimen_mesh, visualize=True)
+    
+    aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
+
+    
+    
+    
+    
+    
+    
+    # # #### Align single scanned STL to the full test setup scan
+    # # # FIX: Need to scan the specific matching specimen
+    # # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    # # matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
+    # # # matched_specimen_mesh.compute_vertex_normals()
+    # # matched_specimen_mesh = align_mesh_with_pca(matched_specimen_mesh)
+    # # matched_specimen_mesh.orient_triangles()
+    
+    
+    # # # Determine fit performance of initial alignment (PCA)
+    # # print('Testing fit performance of initial PCA alignment')
+    # # aligned_specimen_mesh, metrics = align_tgt_mesh_to_ref_pcd(rotated_pcd, matched_specimen_mesh, visualize=True)
+    # # best_percentile = metrics['percentile_95']
+    # # best_mesh = aligned_specimen_mesh
+    
+    # # candidates = generate_candidate_orientations(matched_specimen_mesh, visualize=False)
+    # # for mesh, label in candidates:
+    # #     print(f'Testing fit performance for {label}')
+    # #     aligned_specimen_mesh, metrics = align_tgt_mesh_to_ref_pcd(rotated_pcd, matched_specimen_mesh, visualize=True)
+    # #     percentile = metrics['percentile_95']
+    # #     if percentile < best_percentile:
+    # #         best_percentile = percentile
+    # #         best_mesh = aligned_specimen_mesh
+    # #         print('{label} is the current best fit')
+    # #     # fitness = result.fitness
+    # #     # if fitness > best_fitness:
+    # #     #     best_fitness = fitness
+    # #     #     best_mesh = transformed_source_mesh
+    # #     #     print(f'Found better candidate: {label}, Fitness={best_fitness}')
+    
+    
+    
     
     
     #### Create mesh models of support and anvil cylinders

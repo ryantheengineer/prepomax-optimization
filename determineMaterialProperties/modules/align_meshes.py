@@ -394,39 +394,80 @@ def align_meshes_ultra_precise(mesh_ref, mesh_tgt):
     
     return mesh_tgt, mesh_ref, result_icp.transformation
 
+# def align_mesh_to_pcd_ultra_precise(pcd_ref, mesh_tgt):
+#     """
+#     Ultra-precise alignment using the finest settings
+#     """
+#     print("Loading meshes with high density sampling...")
+#     # mesh_ref, _ = load_and_sample(ref_path, num_points=1)  # We'll create our own sampling
+#     # mesh_tgt, _ = load_and_sample(tgt_path, num_points=1)
+    
+#     # High-density sampling for maximum accuracy
+#     # pcd_ref = mesh_ref.sample_points_uniformly(number_of_points=20000)
+#     pcd_tgt = mesh_tgt.sample_points_uniformly(number_of_points=20000)
+    
+#     # Ensure high-quality normals
+#     pcd_ref.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
+#     pcd_tgt.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
+    
+#     print("Running ultra-precise global alignment...")
+#     voxel_size = 1.0  # Very fine voxel size
+#     result_ransac = execute_global_registration(pcd_tgt, pcd_ref, voxel_size)
+#     print(f"RANSAC fitness: {result_ransac.fitness:.6f}")
+    
+#     print("\nRunning ultra-precise multi-scale ICP...")
+#     # Ultra-fine thresholds for sub-0.1mm accuracy
+#     ultra_fine_thresholds = [1.0, 0.5, 0.25, 0.1, 0.05, 0.02]
+#     result_icp = multi_scale_icp(pcd_tgt, pcd_ref, result_ransac.transformation, ultra_fine_thresholds)
+    
+#     # Final metrics
+#     print(f"\nUltra-precise alignment complete:")
+#     print(f"  Final RMSE: {result_icp.inlier_rmse:.6f}mm")
+    
+#     mesh_tgt.transform(result_icp.transformation)
+    
+#     return mesh_tgt, pcd_ref, result_icp.transformation
+
 def align_mesh_to_pcd_ultra_precise(pcd_ref, mesh_tgt):
     """
     Ultra-precise alignment using the finest settings
     """
     print("Loading meshes with high density sampling...")
-    # mesh_ref, _ = load_and_sample(ref_path, num_points=1)  # We'll create our own sampling
-    # mesh_tgt, _ = load_and_sample(tgt_path, num_points=1)
-    
-    # High-density sampling for maximum accuracy
-    # pcd_ref = mesh_ref.sample_points_uniformly(number_of_points=20000)
     pcd_tgt = mesh_tgt.sample_points_uniformly(number_of_points=20000)
     
-    # Ensure high-quality normals
     pcd_ref.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
     pcd_tgt.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1.0, max_nn=30))
     
     print("Running ultra-precise global alignment...")
-    voxel_size = 1.0  # Very fine voxel size
+    voxel_size = 1.0
     result_ransac = execute_global_registration(pcd_tgt, pcd_ref, voxel_size)
     print(f"RANSAC fitness: {result_ransac.fitness:.6f}")
     
     print("\nRunning ultra-precise multi-scale ICP...")
-    # Ultra-fine thresholds for sub-0.1mm accuracy
     ultra_fine_thresholds = [1.0, 0.5, 0.25, 0.1, 0.05, 0.02]
     result_icp = multi_scale_icp(pcd_tgt, pcd_ref, result_ransac.transformation, ultra_fine_thresholds)
-    
-    # Final metrics
+
     print(f"\nUltra-precise alignment complete:")
     print(f"  Final RMSE: {result_icp.inlier_rmse:.6f}mm")
-    
+
+    # Compute metrics
+    pcd_tgt_copy = copy.deepcopy(pcd_tgt)
+    pcd_tgt_copy.transform(result_icp.transformation)
+    metrics = compute_alignment_metrics(pcd_tgt_copy, pcd_ref)
+
+    print("Alignment Quality Report (Ultra-Precise):")
+    print(f"  Mean distance: {metrics['mean_distance']:.4f}mm")
+    print(f"  Median distance: {metrics['median_distance']:.4f}mm")
+    print(f"  Std deviation: {metrics['std_distance']:.4f}mm")
+    print(f"  95th percentile: {metrics['percentile_95']:.4f}mm")
+    print(f"  99th percentile: {metrics['percentile_99']:.4f}mm")
+    print(f"  Max distance: {metrics['max_distance']:.4f}mm")
+    print(f"  Valid points: {metrics['num_valid_points']}/{metrics['total_points']}")
+
     mesh_tgt.transform(result_icp.transformation)
     
-    return mesh_tgt, pcd_ref, result_icp.transformation
+    return mesh_tgt, pcd_ref, result_icp.transformation, metrics
+
 
 def align_tgt_to_ref_paths(ref_path, tgt_path, output_path=None, visualize=True):
     standard=True
@@ -452,7 +493,7 @@ def align_tgt_to_ref_paths(ref_path, tgt_path, output_path=None, visualize=True)
         else:
             o3d.visualization.draw_geometries([mesh_ref, transformed_mesh], window_name='Precise Alignment')
             
-def align_tgt_to_ref_meshes(mesh_ref, mesh_tgt, visualize=True):
+def align_tgt_to_ref_meshes(mesh_ref, mesh_tgt, output_path=None, visualize=True):
     standard=True
     
     print("=== Standard Enhanced Alignment ===")
@@ -478,40 +519,66 @@ def align_tgt_to_ref_meshes(mesh_ref, mesh_tgt, visualize=True):
             
     return transformed_mesh
 
-def align_tgt_mesh_to_ref_pcd(pcd_ref, mesh_tgt, visualize=True):
-    standard=True
+# def align_tgt_mesh_to_ref_pcd(pcd_ref, mesh_tgt, output_path=None, visualize=True):
+#     standard=True
     
+#     print("=== Standard Enhanced Alignment ===")
+#     transformed_mesh, pcd_ref, transformation, metrics = align_mesh_to_pcd(pcd_ref, mesh_tgt, target_accuracy=0.1)
+    
+#     # If standard alignment doesn't meet requirements, try ultra-precise
+#     if metrics['percentile_95'] > 0.1:
+#         standard=False
+#         print("\n=== Ultra-Precise Alignment ===")
+#         transformed_mesh, pcd_ref, ultra_transformation = align_mesh_to_pcd_ultra_precise(pcd_ref, mesh_tgt)
+    
+#     if output_path:
+#         o3d.io.write_triangle_mesh(output_path, transformed_mesh)
+#         print(f"Aligned mesh saved to {output_path}")
+        
+#     if visualize:
+#         pcd_ref.paint_uniform_color([1, 0.706, 0])
+#         transformed_mesh.paint_uniform_color([0, 0.651, 0.929])
+#         if standard:
+#             o3d.visualization.draw_geometries([pcd_ref, transformed_mesh], window_name='Standard Alignment')
+#         else:
+#             o3d.visualization.draw_geometries([pcd_ref, transformed_mesh], window_name='Precise Alignment')
+            
+#     return transformed_mesh
+
+def align_tgt_mesh_to_ref_pcd(pcd_ref, mesh_tgt, output_path=None, visualize=True):
+    standard = True
+
     print("=== Standard Enhanced Alignment ===")
     transformed_mesh, pcd_ref, transformation, metrics = align_mesh_to_pcd(pcd_ref, mesh_tgt, target_accuracy=0.1)
-    
+
     # If standard alignment doesn't meet requirements, try ultra-precise
     if metrics['percentile_95'] > 0.1:
-        standard=False
+        standard = False
         print("\n=== Ultra-Precise Alignment ===")
-        transformed_mesh, pcd_ref, ultra_transformation = align_mesh_to_pcd_ultra_precise(pcd_ref, mesh_tgt)
-    
+        transformed_mesh, pcd_ref, transformation, metrics = align_mesh_to_pcd_ultra_precise(pcd_ref, mesh_tgt)
+
     if output_path:
         o3d.io.write_triangle_mesh(output_path, transformed_mesh)
         print(f"Aligned mesh saved to {output_path}")
-        
+
     if visualize:
         pcd_ref.paint_uniform_color([1, 0.706, 0])
         transformed_mesh.paint_uniform_color([0, 0.651, 0.929])
-        if standard:
-            o3d.visualization.draw_geometries([pcd_ref, transformed_mesh], window_name='Standard Alignment')
-        else:
-            o3d.visualization.draw_geometries([pcd_ref, transformed_mesh], window_name='Precise Alignment')
-            
-    return transformed_mesh
+        window_title = 'Standard Alignment' if standard else 'Precise Alignment'
+        o3d.visualization.draw_geometries([pcd_ref, transformed_mesh], window_name=window_title)
+
+    return transformed_mesh, metrics
+
 
 if __name__ == "__main__":
     directory = "E:/Fixture Scans"
     
     ref_path = directory + "/" + "scan_1_with_specimen.stl"
     tgt_path = directory + "/" + "specimen.stl"
-    output_path = None
+    output_path = directory + "/" + "aligned_specimen.stl"
+    # output_path = None
     visualize=True
     standard=True
     
-    align_tgt_to_ref_paths(ref_path, tgt_path)
+    align_tgt_to_ref_paths(ref_path, tgt_path, output_path)
             
