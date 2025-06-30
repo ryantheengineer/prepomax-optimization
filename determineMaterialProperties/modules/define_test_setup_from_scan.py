@@ -9,6 +9,7 @@ import time
 import trimesh
 from align_meshes import align_tgt_to_ref_meshes, load_mesh
 import copy
+from scipy.spatial import cKDTree
 
 def load_mesh_as_point_cloud(mesh_path):
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -1413,29 +1414,6 @@ def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, plane
     
     return success, angle_error_X, angle_error_Z, total_angle
 
-# def generate_candidate_orientations(mesh, visualize=False, target_pcd=None):
-#     print("[INFO] Generating candidate 180° flips...")
-#     identities = {
-#         "Original": np.eye(3),
-#         "Flip Z": Rotation.from_euler('z', 180, degrees=True).as_matrix(),
-#         "Flip X": Rotation.from_euler('x', 180, degrees=True).as_matrix(),
-#         "Flip Z+X": Rotation.from_euler('zx', [180, 180], degrees=True).as_matrix()
-#     }
-
-#     candidates = []
-#     for name, rot in identities.items():
-#         m = copy.deepcopy(mesh)
-#         m.rotate(rot, center=(0, 0, 0))
-#         print(f"  - Candidate: {name}")
-#         if visualize and target_pcd:
-#             o3d.visualization.draw_geometries([
-#                 m.paint_uniform_color([1, 0, 0]),
-#                 target_pcd.paint_uniform_color([0, 1, 0]),
-#                 axis
-#             ], window_name=f"Candidate Orientation: {name}")
-#         candidates.append((m, name))
-#     return candidates
-
 def generate_candidate_orientations(mesh, visualize=False, target_pcd=None):
     print("[INFO] Generating candidate 180° flips...")
 
@@ -1466,6 +1444,87 @@ def generate_candidate_orientations(mesh, visualize=False, target_pcd=None):
 
     return candidates
 
+def o3d_to_trimesh(o3d_mesh):
+    """
+    Convert an Open3D TriangleMesh to a Trimesh mesh.
+    
+    Parameters:
+        o3d_mesh (open3d.geometry.TriangleMesh): The Open3D mesh.
+    
+    Returns:
+        trimesh.Trimesh: The equivalent Trimesh object.
+    """
+    vertices = np.asarray(o3d_mesh.vertices)
+    faces = np.asarray(o3d_mesh.triangles)
+
+    # Optionally include vertex normals and colors
+    vertex_normals = np.asarray(o3d_mesh.vertex_normals) if o3d_mesh.has_vertex_normals() else None
+    vertex_colors = np.asarray(o3d_mesh.vertex_colors) if o3d_mesh.has_vertex_colors() else None
+
+    return trimesh.Trimesh(vertices=vertices, faces=faces, vertex_normals=vertex_normals, vertex_colors=vertex_colors, process=False)
+
+def identify_mesh_type(obj):
+    """
+    Identify whether the object is an Open3D TriangleMesh or a Trimesh mesh.
+    
+    Parameters:
+        obj: The object to check.
+
+    Returns:
+        str: One of 'open3d', 'trimesh', or 'unknown'.
+    """
+    if isinstance(obj, o3d.geometry.TriangleMesh):
+        return 'open3d'
+    elif isinstance(obj, trimesh.Trimesh):
+        return 'trimesh'
+    else:
+        return 'unknown'
+
+def ensure_normals_outward(mesh: trimesh.Trimesh, mesh_name=""):
+    mesh_type = identify_mesh_type(mesh)
+    if mesh_type=='open3d':
+        mesh = o3d_to_trimesh(mesh)
+    
+    if not mesh.is_watertight:
+        print(f"Warning: Mesh '{mesh_name}' is not watertight. Normal orientation may be unreliable.")
+    
+    # Attempt to fix normals
+    mesh.fix_normals()
+
+    # Optional check
+    if not mesh.is_winding_consistent:
+        print(f"Warning: Mesh '{mesh_name}' has inconsistent winding after fixing normals.")
+
+    return mesh
+
+def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
+    """
+    Check if flex_mesh intersects with any other mesh in all_meshes using vertex proximity.
+    
+    Parameters:
+        flex_mesh (trimesh.Trimesh): The mesh to check for intersections.
+        all_meshes (list of trimesh.Trimesh): List of meshes, including flex_mesh.
+        threshold (float): Distance threshold below which vertices are considered intersecting.
+    
+    Returns:
+        list of int: Indices of meshes in all_meshes that intersect with flex_mesh.
+    """
+    intersections = []
+    flex_idx = all_meshes.index(flex_mesh)
+    flex_vertices = flex_mesh.vertices
+
+    for idx, other_mesh in enumerate(all_meshes):
+        if idx == flex_idx:
+            continue
+
+        other_vertices = other_mesh.vertices
+        tree = cKDTree(other_vertices)
+        distances, _ = tree.query(flex_vertices, k=1)
+
+        if np.any(distances < threshold):
+            intersections.append(idx)
+
+    return intersections
 
 if __name__ == "__main__":
     mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
@@ -1566,17 +1625,17 @@ if __name__ == "__main__":
     original_vertices = np.asarray(original_mesh.vertices)
     # centroid = original_vertices.mean(axis=0)
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        original_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Reference Mesh As Loaded")
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     original_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Reference Mesh As Loaded")
     
     # === STEP 2: Translate to origin ===
     original_mesh.translate(-centroid)
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        original_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Reference Mesh Translated to Centroid")
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     original_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Reference Mesh Translated to Centroid")
     
     # === STEP 3: PCA alignment ===
     # pca = PCA(n_components=3)
@@ -1584,27 +1643,27 @@ if __name__ == "__main__":
     # ordered_axes = pca.components_[np.argsort(pca.explained_variance_)[::-1]]
     # R_pca = ordered_axes.T @ np.eye(3)
     original_mesh.rotate(R_pca, center=(0, 0, 0))
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        original_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Reference Mesh Rotated by PCA Matrix")
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     original_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Reference Mesh Rotated by PCA Matrix")
     
     # === STEP 4: Rotate 90° about +X ===
     # rotation_angle_rad = np.radians(90)
     # axis_angle = np.array([rotation_angle_rad, 0, 0])
     # R_90X = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
     original_mesh.rotate(R_90X, center=(0, 0, 0))
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        original_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Reference Mesh Rotated by PCA Matrix and 90 Degrees +X")
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     original_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Reference Mesh Rotated by PCA Matrix and 90 Degrees +X")
     
     # === STEP 5: Apply final minimal rotation matrix R ===
     original_mesh.rotate(R_planes, center=(0, 0, 0))
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        original_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Reference Mesh Rotated by PCA Matrix, 90 Degrees +X, and Fine Adjustment")
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     original_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Reference Mesh Rotated by PCA Matrix, 90 Degrees +X, and Fine Adjustment")
     
     # === RESULT ===
     transformed_reference_mesh = original_mesh
@@ -1637,46 +1696,6 @@ if __name__ == "__main__":
     matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
     
     aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
-
-    
-    
-    
-    
-    
-    
-    # # #### Align single scanned STL to the full test setup scan
-    # # # FIX: Need to scan the specific matching specimen
-    # # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
-    # # matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
-    # # # matched_specimen_mesh.compute_vertex_normals()
-    # # matched_specimen_mesh = align_mesh_with_pca(matched_specimen_mesh)
-    # # matched_specimen_mesh.orient_triangles()
-    
-    
-    # # # Determine fit performance of initial alignment (PCA)
-    # # print('Testing fit performance of initial PCA alignment')
-    # # aligned_specimen_mesh, metrics = align_tgt_mesh_to_ref_pcd(rotated_pcd, matched_specimen_mesh, visualize=True)
-    # # best_percentile = metrics['percentile_95']
-    # # best_mesh = aligned_specimen_mesh
-    
-    # # candidates = generate_candidate_orientations(matched_specimen_mesh, visualize=False)
-    # # for mesh, label in candidates:
-    # #     print(f'Testing fit performance for {label}')
-    # #     aligned_specimen_mesh, metrics = align_tgt_mesh_to_ref_pcd(rotated_pcd, matched_specimen_mesh, visualize=True)
-    # #     percentile = metrics['percentile_95']
-    # #     if percentile < best_percentile:
-    # #         best_percentile = percentile
-    # #         best_mesh = aligned_specimen_mesh
-    # #         print('{label} is the current best fit')
-    # #     # fitness = result.fitness
-    # #     # if fitness > best_fitness:
-    # #     #     best_fitness = fitness
-    # #     #     best_mesh = transformed_source_mesh
-    # #     #     print(f'Found better candidate: {label}, Fitness={best_fitness}')
-    
-    
-    
-    
     
     #### Create mesh models of support and anvil cylinders
     diameter = 10
@@ -1734,7 +1753,56 @@ if __name__ == "__main__":
     o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
     # o3d.visualization.draw_geometries(keep_inlier_clouds + [axis] + optimized_plane_meshes + cylinder_meshes, window_name="Optimized Planes")
     
+    anvil = ensure_normals_outward(anvil, mesh_name="anvil")
+    l_support = ensure_normals_outward(l_support, mesh_name="left_support")
+    r_support = ensure_normals_outward(r_support, mesh_name="right_support")
+    flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh")
     
+    # Combine meshes
+    all_meshes = [flex_mesh, anvil, l_support, r_support]
+    
+    intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    
+    increment = 0.01  # Adjust the movement step as needed
+    max_iterations = 100  # Prevent infinite loops
+    
+    if intersecting_indices:
+        for _ in range(max_iterations):
+            still_intersecting = False
+    
+            # Check and resolve intersection with anvil
+            if all_meshes.index(anvil) in intersecting_indices:
+                # Move anvil up in Z
+                anvil.apply_translation([0, 0, increment])
+                print(f"Applying {increment} adjustment to Z position of anvil")
+                # Recheck
+                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                if all_meshes.index(anvil) in updated:
+                    still_intersecting = True
+    
+            # Check and resolve intersection with supports
+            l_idx = all_meshes.index(l_support)
+            r_idx = all_meshes.index(r_support)
+            if l_idx in intersecting_indices or r_idx in intersecting_indices:
+                # Move both supports down in Z
+                l_support.apply_translation([0, 0, -increment])
+                r_support.apply_translation([0, 0, -increment])
+                print(f"Applying -{increment} adjustment to Z position of supports")
+                # Recheck
+                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                if l_idx in updated or r_idx in updated:
+                    still_intersecting = True
+    
+            if not still_intersecting:
+                break
+        else:
+            print("Warning: Maximum adjustment iterations reached, intersection may still exist.")
+    
+    
+    merged_mesh = trimesh.util.concatenate(all_meshes)
+    
+    output_filepath = "E:/Fixture Scans/prepared_test.stl"
+    merged_mesh.export(output_filepath)
     
     
     # NEXT STEPS:
