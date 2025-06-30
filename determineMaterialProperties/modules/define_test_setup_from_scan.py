@@ -16,6 +16,106 @@ def load_mesh_as_point_cloud(mesh_path):
     pcd = mesh.sample_points_poisson_disk(number_of_points=10000)
     return pcd
 
+def align_with_pca_separated(geometry, is_point_cloud=True):
+    """
+    Create separate translation and rotation matrices for PCA alignment
+    
+    Returns:
+    - T_translate: 4x4 matrix that translates to centroid
+    - T_rotate: 4x4 matrix that applies PCA rotation (around origin)
+    - T_combined: 4x4 matrix that does both (translate then rotate)
+    - rotation_matrix_3x3: 3x3 rotation matrix for downstream processes
+    - centroid: the centroid point
+    """
+    if is_point_cloud:
+        points = np.asarray(geometry.points)
+    else:
+        points = np.asarray(geometry.vertices)
+    
+    # Compute centroid
+    centroid = np.mean(points, axis=0)
+    
+    # Perform PCA (same as manual method)
+    pca = PCA(n_components=3)
+    pca.fit(points - centroid)
+    axes = pca.components_
+    
+    # Sort axes by explained variance (descending)
+    order = np.argsort(pca.explained_variance_)[::-1]
+    ordered_axes = axes[order]
+    
+    # Enforce right-handed coordinate system
+    if np.linalg.det(ordered_axes) < 0:
+        ordered_axes[2, :] *= -1
+    
+    # The 3x3 rotation matrix for downstream processes
+    rotation_matrix_3x3 = ordered_axes.T
+    
+    # Create separate transformation matrices
+    
+    # 1. Translation matrix: moves geometry so centroid is at origin
+    T_translate = np.eye(4)
+    T_translate[:3, 3] = -centroid
+    
+    # 2. Rotation matrix: applies PCA rotation around origin
+    T_rotate = np.eye(4)
+    T_rotate[:3, :3] = rotation_matrix_3x3.T  # For Open3D transform
+    
+    # 3. Combined matrix (equivalent to original working version)
+    T_combined = T_rotate @ T_translate
+    
+    return T_translate, T_rotate, T_combined, rotation_matrix_3x3, centroid
+
+def align_with_pca(geometry, is_point_cloud=True):
+    """
+    Original working function - kept for compatibility
+    """
+    T_translate, T_rotate, T_combined, rotation_matrix_3x3, centroid = align_with_pca_separated(geometry, is_point_cloud)
+    return T_combined, rotation_matrix_3x3, centroid
+
+def align_point_cloud_with_pca_manual(pcd):
+    """
+    Your working function for reference - aligns point cloud manually
+    """
+    if not isinstance(pcd, o3d.geometry.PointCloud):
+        raise ValueError("Input must be an Open3D PointCloud.")
+    
+    # Convert to numpy array
+    points = np.asarray(pcd.points)
+    
+    # Center the points at origin
+    centroid = np.mean(points, axis=0)
+    centered_points = points - centroid
+    
+    # Perform PCA
+    pca = PCA(n_components=3)
+    pca.fit(centered_points)
+    axes = pca.components_
+    
+    # Sort axes by explained variance (descending)
+    order = np.argsort(pca.explained_variance_)[::-1]
+    ordered_axes = axes[order]
+    
+    # Enforce right-handed coordinate system
+    if np.linalg.det(ordered_axes) < 0:
+        ordered_axes[2, :] *= -1
+    
+    # Apply rotation (this is what your function does)
+    rotation_matrix_manual = ordered_axes.T
+    rotated_points = centered_points @ rotation_matrix_manual
+    
+    # Create new point cloud
+    pcd_pca = o3d.geometry.PointCloud()
+    pcd_pca.points = o3d.utility.Vector3dVector(rotated_points)
+    
+    # Copy over colors if they exist
+    if pcd.has_colors():
+        pcd_pca.colors = pcd.colors
+    if pcd.has_normals():
+        pcd_pca.estimate_normals()
+        
+    return pcd_pca, rotation_matrix_manual, centroid
+
 def align_point_cloud_with_pca(pcd):
     if not isinstance(pcd, o3d.geometry.PointCloud):
         raise ValueError("Input must be an Open3D PointCloud.")
@@ -56,7 +156,7 @@ def align_point_cloud_with_pca(pcd):
         
     # o3d.visualization.draw_geometries([pcd_pca], window_name="PCA Point Cloud")
     
-    return pcd_pca
+    return pcd_pca, rotation_matrix, centroid
 
 def align_mesh_with_pca(mesh):
     if not isinstance(mesh, o3d.geometry.TriangleMesh):
@@ -265,13 +365,30 @@ def filter_duplicate_planes(planes, target_axis, d_threshold=1.0):
 
 def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     # Align the point cloud with PCA
-    pcd = align_point_cloud_with_pca(base_pcd)
+    # pcd, R_pca, centroid = align_point_cloud_with_pca(base_pcd)
+    T_translate, R_pca, T_combined, R_3x3, centroid = align_with_pca_separated(base_pcd, is_point_cloud=True)
+    # T_pca, rotation_matrix_manual, centroid = align_with_pca(base_pcd, is_point_cloud=True)
+    
+    pcd = copy.deepcopy(base_pcd)
+    pcd.transform(T_translate)
+    pcd.transform(R_pca)
+    
+    R_pca = R_pca[:3,:3]
+    
+    print(f'\nPCA Rotation Matrix:\n{R_pca}')
+    print(f'PCA Centroid:\t{centroid}')
     
     # Rotate the point cloud about X so the greatest variation aligns with Z
     rotation_angle = np.radians(90)
     axis_angle = np.array([rotation_angle, 0, 0])
-    rotation_matrix = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
-    pcd.rotate(rotation_matrix, center=(0,0,0))    
+    R_90X = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+    pcd.rotate(R_90X, center=(0,0,0))
+    
+    print(f'\n90 degree X rotation matrix:\n{R_90X}')
+    
+    R_PCA_90X = R_90X @ R_pca
+    
+    print(f'\nPCA Rotation with 90 degree X matrix:\n{R_PCA_90X}')
     
     target_axis = np.array(target_axis)
     # x_axis = np.array([1, 0, 0])
@@ -336,7 +453,7 @@ def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_thresho
     # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
     
     filtered_plane_meshes = [plane_meshes[i] for i in retained_idxs]
-    return pcd, filtered_planes, retained_idxs, filtered_plane_meshes, filtered_inlier_clouds
+    return pcd, filtered_planes, retained_idxs, filtered_plane_meshes, filtered_inlier_clouds, R_pca, R_90X, centroid
 
 def detect_fixture_planes(base_pcd, target_axes):
     keep_planes = []
@@ -352,7 +469,7 @@ def detect_fixture_planes(base_pcd, target_axes):
         
             for attempt in range(max_retries):
                 try:
-                    pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds = detect_planes(
+                    pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds, R_PCA, R_90X, centroid = detect_planes(
                         base_pcd, target_axis=target_axis)
         
                     prev_len = len(filtered_planes)
@@ -416,7 +533,7 @@ def detect_fixture_planes(base_pcd, target_axes):
     o3d.visualization.draw_geometries([pcd, axis] + keep_plane_meshes)
     # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
     
-    return keep_planes, keep_inlier_clouds, pcd
+    return keep_planes, keep_inlier_clouds, pcd, R_PCA, R_90X, centroid
             
 
 def normalize_plane_append(plane):
@@ -1292,7 +1409,7 @@ def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, plane
     print(f"Total rotation angle: {total_angle:.3f}°")
     
     success = angle_error_X < 0.1 and angle_error_Z < 0.1
-    print(f"Alignment successful: {success}")
+    print(f"Alignment successful: {success}\n\n")
     
     return success, angle_error_X, angle_error_Z, total_angle
 
@@ -1363,7 +1480,7 @@ if __name__ == "__main__":
     
     supports_distance = 127.66
     
-    keep_planes, keep_inlier_clouds, aligned_pcd = detect_fixture_planes(base_pcd, target_axes)
+    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, centroid = detect_fixture_planes(base_pcd, target_axes)
     
     # o3d.visualization.draw_geometries([aligned_pcd] + keep_inlier_clouds, window_name='Keep Inlier Clouds')
     
@@ -1420,15 +1537,20 @@ if __name__ == "__main__":
     planeZ = optimized_planes[planeZ_idx]
     
     # Perform alignment
-    rotated_pcd, rotated_planes, R, info = align_planes_to_axes_minimal_v2(
+    rotated_pcd, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
         aligned_pcd, optimized_planes, planeX, planeZ
     )
     
     # Validate results
     success, error_X, error_Z, total_angle = validate_minimal_rotation(
-        optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R
+        optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R_planes
     )    
     
+    print(f'\nPlane adjustment R matrix:\n{R_planes}')
+    
+    R_total = R_planes @ R_90X @ R_pca
+    
+    print(f'\nR Total:\n{R_total}')
     
     # # Apply the R rotation matrix to the original mesh
     # test_mesh = load_mesh(mesh_path)
@@ -1439,24 +1561,73 @@ if __name__ == "__main__":
     
     # aligned_specimen_mesh = align_tgt_to_ref_meshes(test_mesh_rotated, matched_specimen_mesh)
     
-    # Load original mesh
+    # === STEP 1: Load the original mesh ===
     original_mesh = load_mesh(mesh_path)
-    
-    # Get original mesh centroid for translation
     original_vertices = np.asarray(original_mesh.vertices)
-    centroid = original_vertices.mean(axis=0)
+    # centroid = original_vertices.mean(axis=0)
+    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        original_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Reference Mesh As Loaded")
     
-    # Step 1: Translate to origin
-    translated_vertices = original_vertices - centroid
+    # === STEP 2: Translate to origin ===
+    original_mesh.translate(-centroid)
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        original_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Reference Mesh Translated to Centroid")
     
-    # Step 2: Apply rotation matrix
-    rotated_vertices = translated_vertices @ R.T  # Open3D expects R.T for .rotate()
+    # === STEP 3: PCA alignment ===
+    # pca = PCA(n_components=3)
+    # pca.fit(np.asarray(original_mesh.vertices))
+    # ordered_axes = pca.components_[np.argsort(pca.explained_variance_)[::-1]]
+    # R_pca = ordered_axes.T @ np.eye(3)
+    original_mesh.rotate(R_pca, center=(0, 0, 0))
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        original_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Reference Mesh Rotated by PCA Matrix")
     
-    # Step 3: Create transformed mesh
-    transformed_reference_mesh = o3d.geometry.TriangleMesh()
-    transformed_reference_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
-    transformed_reference_mesh.triangles = original_mesh.triangles
-    transformed_reference_mesh.compute_vertex_normals()
+    # === STEP 4: Rotate 90° about +X ===
+    # rotation_angle_rad = np.radians(90)
+    # axis_angle = np.array([rotation_angle_rad, 0, 0])
+    # R_90X = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+    original_mesh.rotate(R_90X, center=(0, 0, 0))
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        original_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Reference Mesh Rotated by PCA Matrix and 90 Degrees +X")
+    
+    # === STEP 5: Apply final minimal rotation matrix R ===
+    original_mesh.rotate(R_planes, center=(0, 0, 0))
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        original_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Reference Mesh Rotated by PCA Matrix, 90 Degrees +X, and Fine Adjustment")
+    
+    # === RESULT ===
+    transformed_reference_mesh = original_mesh
+    
+    o3d.visualization.draw_geometries([
+        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+        transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
+        axis], window_name="Transformed Reference Mesh")
+
+    
+    
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
+    # transformed_reference_mesh.paint_uniform_color([1, 0, 0])
+    # o3d.visualization.draw_geometries(
+    #     [transformed_reference_mesh, axis],
+    #     window_name="Transformed Mesh")
+    
+    
+    
+    # transformed_reference_mesh = o3d.geometry.TriangleMesh()
+    # transformed_reference_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
+    # transformed_reference_mesh.triangles = original_mesh.triangles
+    # transformed_reference_mesh.compute_vertex_normals()
     
     # Optionally: Save or visualize it
     # o3d.io.write_triangle_mesh("transformed_reference.stl", transformed_reference_mesh)

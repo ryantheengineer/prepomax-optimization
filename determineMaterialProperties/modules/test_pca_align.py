@@ -9,17 +9,20 @@ import numpy as np
 from sklearn.decomposition import PCA
 import copy
 
-def align_with_pca(geometry, is_point_cloud=True):
+def align_with_pca_separated(geometry, is_point_cloud=True):
     """
-    Create a 4x4 transformation matrix that produces the same result as the manual PCA method
+    Create separate translation and rotation matrices for PCA alignment
     
-    Manual method does: (points - centroid) @ rotation_matrix
-    We need to create T such that when Open3D applies it, we get the same result
+    Returns:
+    - T_translate: 4x4 matrix that translates to centroid
+    - T_rotate: 4x4 matrix that applies PCA rotation (around origin)
+    - T_combined: 4x4 matrix that does both (translate then rotate)
+    - rotation_matrix_3x3: 3x3 rotation matrix for downstream processes
+    - centroid: the centroid point
     """
     if is_point_cloud:
         points = np.asarray(geometry.points)
     else:
-        # For mesh, use vertices
         points = np.asarray(geometry.vertices)
     
     # Compute centroid
@@ -38,23 +41,30 @@ def align_with_pca(geometry, is_point_cloud=True):
     if np.linalg.det(ordered_axes) < 0:
         ordered_axes[2, :] *= -1
     
-    # The rotation matrix from the manual method
-    rotation_matrix_manual = ordered_axes.T
+    # The 3x3 rotation matrix for downstream processes
+    rotation_matrix_3x3 = ordered_axes.T
     
-    # For Open3D transform: result = R @ points + t
-    # We want: result = (points - centroid) @ rotation_matrix_manual
-    # Which is: result = points @ rotation_matrix_manual - centroid @ rotation_matrix_manual
-    # So: R = rotation_matrix_manual.T, t = -centroid @ rotation_matrix_manual
+    # Create separate transformation matrices
     
-    R_transform = rotation_matrix_manual.T
-    t_transform = -centroid @ rotation_matrix_manual
+    # 1. Translation matrix: moves geometry so centroid is at origin
+    T_translate = np.eye(4)
+    T_translate[:3, 3] = -centroid
     
-    # Build 4x4 transformation matrix
-    T = np.eye(4)
-    T[:3, :3] = R_transform
-    T[:3, 3] = t_transform
+    # 2. Rotation matrix: applies PCA rotation around origin
+    T_rotate = np.eye(4)
+    T_rotate[:3, :3] = rotation_matrix_3x3.T  # For Open3D transform
     
-    return T, rotation_matrix_manual, centroid
+    # 3. Combined matrix (equivalent to original working version)
+    T_combined = T_rotate @ T_translate
+    
+    return T_translate, T_rotate, T_combined, rotation_matrix_3x3, centroid
+
+def align_with_pca(geometry, is_point_cloud=True):
+    """
+    Original working function - kept for compatibility
+    """
+    T_translate, T_rotate, T_combined, rotation_matrix_3x3, centroid = align_with_pca_separated(geometry, is_point_cloud)
+    return T_combined, rotation_matrix_3x3, centroid
 
 def align_point_cloud_with_pca_manual(pcd):
     """
@@ -144,88 +154,112 @@ o3d.visualization.draw_geometries([mesh_original_vis, pcd_original_vis, original
                                   window_name="Original Geometry with World Coordinate System",
                                   width=1000, height=800)
 
-# === Apply PCA transformation using corrected method ===
-T_pca, R_pca, centroid = align_with_pca(pcd, is_point_cloud=True)
+# === Apply PCA transformation using separated method ===
+T_translate, T_rotate, T_combined, R_3x3, centroid = align_with_pca_separated(pcd, is_point_cloud=True)
 
 # === Also create the manual alignment for comparison ===
 pcd_manual, R_manual, centroid_manual = align_point_cloud_with_pca_manual(pcd)
 
-# === Apply the transformation matrix to both geometries ===
-mesh_transformed = copy.deepcopy(mesh)
-mesh_transformed.transform(T_pca)
+# === Apply transformations in different ways ===
 
-pcd_transformed = copy.deepcopy(pcd)
-pcd_transformed.transform(T_pca)
+# Method 1: Combined transformation (should match original working version)
+mesh_combined = copy.deepcopy(mesh)
+mesh_combined.transform(T_combined)
+pcd_combined = copy.deepcopy(pcd)
+pcd_combined.transform(T_combined)
+
+# Method 2: Separate transformations (translate first, then rotate)
+mesh_separated = copy.deepcopy(mesh)
+mesh_separated.transform(T_translate)  # First translate to origin
+mesh_separated.transform(T_rotate)     # Then rotate
+pcd_separated = copy.deepcopy(pcd)
+pcd_separated.transform(T_translate)
+pcd_separated.transform(T_rotate)
+
+# Method 3: Just rotation (for downstream processes that handle translation separately)
+mesh_rotation_only = copy.deepcopy(mesh)
+# First manually translate to centroid
+vertices = np.asarray(mesh_rotation_only.vertices)
+vertices_centered = vertices - centroid
+mesh_rotation_only.vertices = o3d.utility.Vector3dVector(vertices_centered)
+# Then apply only rotation
+mesh_rotation_only.transform(T_rotate)
 
 # === VISUALIZATION 2: PCA aligned geometry with WCS axes ===
 print("Showing PCA-aligned geometry...")
-mesh_transformed.paint_uniform_color([1, 0, 0])  # Red mesh
-pcd_transformed.paint_uniform_color([0, 1, 1])   # Cyan points
+mesh_combined.paint_uniform_color([1, 0, 0])  # Red mesh
+pcd_combined.paint_uniform_color([0, 1, 1])   # Cyan points
 
 # Create new axes for the aligned view
-aligned_bbox = mesh_transformed.get_axis_aligned_bounding_box()
+aligned_bbox = mesh_combined.get_axis_aligned_bounding_box()
 aligned_axes_scale = np.linalg.norm(aligned_bbox.get_extent()) * 0.2
 aligned_axes = create_coordinate_axes(aligned_axes_scale)
 
-o3d.visualization.draw_geometries([pcd_transformed, mesh_transformed, aligned_axes],
+o3d.visualization.draw_geometries([pcd_combined, mesh_combined, aligned_axes],
                                   window_name="PCA-Aligned Geometry with World Coordinate System",
                                   width=1000, height=800)
 
-# === VISUALIZATION 3: Compare manual vs transform method ===
-print("Showing comparison: Manual PCA (blue) vs Transform method (cyan)...")
+# === VISUALIZATION 3: Compare all methods ===
+print("Showing comparison: Manual PCA (blue), Combined transform (cyan), Separated transform (red)...")
 pcd_manual.paint_uniform_color([0, 0, 1])       # Blue - your manual method
-pcd_transformed.paint_uniform_color([0, 1, 1])  # Cyan - transform method
+pcd_combined.paint_uniform_color([0, 1, 1])     # Cyan - combined transform
+pcd_separated.paint_uniform_color([1, 0, 0])    # Red - separated transforms
 
 comparison_axes = create_coordinate_axes(aligned_axes_scale)
-o3d.visualization.draw_geometries([pcd_manual, pcd_transformed, comparison_axes],
-                                  window_name="Comparison: Manual PCA vs Transform Method",
+o3d.visualization.draw_geometries([pcd_manual, pcd_combined, pcd_separated, comparison_axes],
+                                  window_name="Comparison: Manual vs Combined vs Separated Transforms",
                                   width=1000, height=800)
 
 # === Verification metrics ===
 print("\n=== VERIFICATION METRICS ===")
 
-# 1. Check transformation matrix properties
-det_rotation = np.linalg.det(T_pca[:3, :3])
-print(f"Rotation matrix determinant: {det_rotation:.8f} (should be close to 1.0)")
+# 1. Check transformation matrices
+print("Transformation matrices:")
+print(f"Translation matrix T_translate:\n{T_translate}")
+print(f"\nRotation matrix T_rotate:\n{T_rotate}")
+print(f"\nCombined matrix T_combined:\n{T_combined}")
+print(f"\n3x3 Rotation matrix for downstream processes:\n{R_3x3}")
 
-# 2. Compare rotation matrices
-print(f"\nRotation matrix from transform method:")
-print(R_pca)
-print(f"\nRotation matrix from manual method:")
-print(R_manual)
-print(f"Are they equal? {np.allclose(R_pca, R_manual)}")
+# 2. Verify matrix properties
+det_rotation_3x3 = np.linalg.det(R_3x3)
+det_rotation_4x4 = np.linalg.det(T_rotate[:3, :3])
+print(f"\n3x3 rotation matrix determinant: {det_rotation_3x3:.8f}")
+print(f"4x4 rotation matrix determinant: {det_rotation_4x4:.8f}")
+print(f"Both should be close to 1.0 for proper rotations")
 
-# 3. Compare centroids
-original_mesh_centroid = np.mean(np.asarray(mesh.vertices), axis=0)
-original_pcd_centroid = np.mean(np.asarray(pcd.points), axis=0)
-transformed_mesh_centroid = np.mean(np.asarray(mesh_transformed.vertices), axis=0)
-transformed_pcd_centroid = np.mean(np.asarray(pcd_transformed.points), axis=0)
-manual_pcd_centroid = np.mean(np.asarray(pcd_manual.points), axis=0)
+# 3. Compare all methods
+methods = [
+    ("Manual", pcd_manual),
+    ("Combined", pcd_combined), 
+    ("Separated", pcd_separated)
+]
 
 print(f"\nCentroid comparison:")
-print(f"Original mesh: [{original_mesh_centroid[0]:.4f}, {original_mesh_centroid[1]:.4f}, {original_mesh_centroid[2]:.4f}]")
-print(f"Original pcd:  [{original_pcd_centroid[0]:.4f}, {original_pcd_centroid[1]:.4f}, {original_pcd_centroid[2]:.4f}]")
-print(f"Transform mesh: [{transformed_mesh_centroid[0]:.4f}, {transformed_mesh_centroid[1]:.4f}, {transformed_mesh_centroid[2]:.4f}]")
-print(f"Transform pcd:  [{transformed_pcd_centroid[0]:.4f}, {transformed_pcd_centroid[1]:.4f}, {transformed_pcd_centroid[2]:.4f}]")
-print(f"Manual pcd:     [{manual_pcd_centroid[0]:.4f}, {manual_pcd_centroid[1]:.4f}, {manual_pcd_centroid[2]:.4f}]")
+for name, pcd_method in methods:
+    centroid_method = np.mean(np.asarray(pcd_method.points), axis=0)
+    print(f"{name:10s}: [{centroid_method[0]:.6f}, {centroid_method[1]:.6f}, {centroid_method[2]:.6f}]")
 
-# 4. Check alignment between point cloud and mesh
-distances = pcd_transformed.compute_point_cloud_distance(mesh_transformed.sample_points_poisson_disk(10000))
-mean_distance = np.mean(distances)
-max_distance = np.max(distances)
-std_distance = np.std(distances)
+# 4. Check if all methods produce identical results
+print(f"\nMethod equivalence checks:")
+combined_vs_manual = pcd_combined.compute_point_cloud_distance(pcd_manual)
+separated_vs_manual = pcd_separated.compute_point_cloud_distance(pcd_manual)
+separated_vs_combined = pcd_separated.compute_point_cloud_distance(pcd_combined)
 
-print(f"\nAlignment verification (transform method):")
-print(f"Mean distance between aligned point cloud and mesh surface: {mean_distance:.6f}")
-print(f"Max distance: {max_distance:.6f}")
-print(f"Standard deviation: {std_distance:.6f}")
+print(f"Combined vs Manual mean distance: {np.mean(combined_vs_manual):.10f}")
+print(f"Separated vs Manual mean distance: {np.mean(separated_vs_manual):.10f}")
+print(f"Separated vs Combined mean distance: {np.mean(separated_vs_combined):.10f}")
+print(f"All methods equivalent: {np.mean(combined_vs_manual) < 1e-10 and np.mean(separated_vs_manual) < 1e-10}")
 
-# 5. Check if manual and transform methods produce same result
-manual_vs_transform_distances = pcd_manual.compute_point_cloud_distance(pcd_transformed)
-mean_diff = np.mean(manual_vs_transform_distances)
-print(f"\nDifference between manual and transform methods:")
-print(f"Mean point-to-point distance: {mean_diff:.8f}")
-print(f"Methods are equivalent: {mean_diff < 1e-10}")
+# 5. Show what your downstream processes would use
+print(f"\n=== FOR DOWNSTREAM PROCESSES ===")
+print(f"Centroid to translate to origin: {centroid}")
+print(f"3x3 Rotation matrix to use:\n{R_3x3}")
+print(f"Or 4x4 rotation-only matrix:\n{T_rotate}")
+
+print(f"\nTo replicate the PCA alignment in your downstream process:")
+print(f"1. Translate points by subtracting centroid: points - centroid")
+print(f"2. Apply rotation: (points - centroid) @ R_3x3")
+print(f"   OR apply 4x4 rotation matrix to already-centered geometry")
 
 # 5. Show PCA explained variance ratios and axis alignment
 pca_temp = PCA(n_components=3)
