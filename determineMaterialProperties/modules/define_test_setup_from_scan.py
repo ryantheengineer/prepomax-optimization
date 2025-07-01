@@ -2,6 +2,8 @@ import open3d as o3d
 import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 from sklearn.decomposition import PCA
 from sklearn.cluster import DBSCAN
 from itertools import combinations
@@ -10,6 +12,8 @@ import trimesh
 from align_meshes import align_tgt_to_ref_meshes, load_mesh
 import copy
 from scipy.spatial import cKDTree
+import pandas as pd
+import os
 
 def load_mesh_as_point_cloud(mesh_path):
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -117,84 +121,84 @@ def align_point_cloud_with_pca_manual(pcd):
         
     return pcd_pca, rotation_matrix_manual, centroid
 
-def align_point_cloud_with_pca(pcd):
-    if not isinstance(pcd, o3d.geometry.PointCloud):
-        raise ValueError("Input must be an Open3D PointCloud.")
+# def align_point_cloud_with_pca(pcd):
+#     if not isinstance(pcd, o3d.geometry.PointCloud):
+#         raise ValueError("Input must be an Open3D PointCloud.")
 
-    # Convert to numpy array
-    points = np.asarray(pcd.points)
+#     # Convert to numpy array
+#     points = np.asarray(pcd.points)
 
-    # Center the points at origin
-    centroid = np.mean(points, axis=0)
-    centered_points = points - centroid
+#     # Center the points at origin
+#     centroid = np.mean(points, axis=0)
+#     centered_points = points - centroid
 
-    # Perform PCA
-    pca = PCA(n_components=3)
-    pca.fit(centered_points)
-    axes = pca.components_
+#     # Perform PCA
+#     pca = PCA(n_components=3)
+#     pca.fit(centered_points)
+#     axes = pca.components_
 
-    # Sort axes by explained variance (descending)
-    order = np.argsort(pca.explained_variance_)[::-1]
-    ordered_axes = axes[order]
+#     # Sort axes by explained variance (descending)
+#     order = np.argsort(pca.explained_variance_)[::-1]
+#     ordered_axes = axes[order]
 
-    # Align principal components with +X, +Y, +Z
-    target_axes = np.eye(3)
-    rotation_matrix = ordered_axes.T @ target_axes
+#     # Align principal components with +X, +Y, +Z
+#     target_axes = np.eye(3)
+#     rotation_matrix = ordered_axes.T @ target_axes
 
-    # Apply rotation
-    rotated_points = centered_points @ rotation_matrix
+#     # Apply rotation
+#     rotated_points = centered_points @ rotation_matrix
 
-    # Create new point cloud
-    pcd_pca = o3d.geometry.PointCloud()
-    pcd_pca.points = o3d.utility.Vector3dVector(rotated_points)
+#     # Create new point cloud
+#     pcd_pca = o3d.geometry.PointCloud()
+#     pcd_pca.points = o3d.utility.Vector3dVector(rotated_points)
 
-    # Copy over colors if they exist
-    if pcd.has_colors():
-        pcd_pca.colors = pcd.colors
-    if pcd.has_normals():
-        # Recompute normals since they may no longer be valid
-        pcd_pca.estimate_normals()
+#     # Copy over colors if they exist
+#     if pcd.has_colors():
+#         pcd_pca.colors = pcd.colors
+#     if pcd.has_normals():
+#         # Recompute normals since they may no longer be valid
+#         pcd_pca.estimate_normals()
         
-    # o3d.visualization.draw_geometries([pcd_pca], window_name="PCA Point Cloud")
+#     # o3d.visualization.draw_geometries([pcd_pca], window_name="PCA Point Cloud")
     
-    return pcd_pca, rotation_matrix, centroid
+#     return pcd_pca, rotation_matrix, centroid
 
-def align_mesh_with_pca(mesh):
-    if not isinstance(mesh, o3d.geometry.TriangleMesh):
-        raise ValueError("Input must be an Open3D TriangleMesh.")
+# def align_mesh_with_pca(mesh):
+#     if not isinstance(mesh, o3d.geometry.TriangleMesh):
+#         raise ValueError("Input must be an Open3D TriangleMesh.")
 
-    # Convert vertices to numpy array
-    vertices = np.asarray(mesh.vertices)
+#     # Convert vertices to numpy array
+#     vertices = np.asarray(mesh.vertices)
 
-    # Center the mesh at the origin
-    centroid = np.mean(vertices, axis=0)
-    centered_vertices = vertices - centroid
+#     # Center the mesh at the origin
+#     centroid = np.mean(vertices, axis=0)
+#     centered_vertices = vertices - centroid
 
-    # Perform PCA
-    pca = PCA(n_components=3)
-    pca.fit(centered_vertices)
-    axes = pca.components_
+#     # Perform PCA
+#     pca = PCA(n_components=3)
+#     pca.fit(centered_vertices)
+#     axes = pca.components_
 
-    # Sort axes by explained variance (descending)
-    order = np.argsort(pca.explained_variance_)[::-1]
-    ordered_axes = axes[order]
+#     # Sort axes by explained variance (descending)
+#     order = np.argsort(pca.explained_variance_)[::-1]
+#     ordered_axes = axes[order]
 
-    # Align principal components with +X, +Y, +Z
-    target_axes = np.eye(3)
-    rotation_matrix = ordered_axes.T @ target_axes
+#     # Align principal components with +X, +Y, +Z
+#     target_axes = np.eye(3)
+#     rotation_matrix = ordered_axes.T @ target_axes
 
-    # Apply rotation
-    rotated_vertices = centered_vertices @ rotation_matrix
+#     # Apply rotation
+#     rotated_vertices = centered_vertices @ rotation_matrix
 
-    # Create a new mesh with rotated vertices and same faces
-    aligned_mesh = o3d.geometry.TriangleMesh()
-    aligned_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
-    aligned_mesh.triangles = mesh.triangles
+#     # Create a new mesh with rotated vertices and same faces
+#     aligned_mesh = o3d.geometry.TriangleMesh()
+#     aligned_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
+#     aligned_mesh.triangles = mesh.triangles
 
-    # Recompute normals since geometry has changed
-    aligned_mesh.compute_vertex_normals()
+#     # Recompute normals since geometry has changed
+#     aligned_mesh.compute_vertex_normals()
 
-    return aligned_mesh
+#     return aligned_mesh
 
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
@@ -301,35 +305,6 @@ def plane_similarity(plane1, plane2):
 
     return normal_diff + d_diff  # Lower = more similar
 
-# def filter_duplicate_planes(planes, target_axis):
-#     planes = np.array(planes)
-#     n = len(planes)
-#     used = [False] * n
-#     keep = []
-
-#     for i in range(n):
-#         if used[i]:
-#             continue
-#         current_group = [i]
-#         for j in range(i + 1, n):
-#             if used[j]:
-#                 continue
-#             sim = plane_similarity(planes[i], planes[j])
-#             # We find the closest neighbor based on similarity
-#             if sim < 0.05:  # Very tight, not arbitrary — adjust if needed
-#                 current_group.append(j)
-
-#         # Select best-aligned with target_axis
-#         best_idx = max(
-#             current_group,
-#             key=lambda idx: abs(np.dot(planes[idx][:3] / np.linalg.norm(planes[idx][:3]), target_axis))
-#         )
-#         keep.append(planes[best_idx])
-#         for idx in current_group:
-#             used[idx] = True
-
-#     return keep
-
 def filter_duplicate_planes(planes, target_axis, d_threshold=1.0):
     """
     Filters out planes with similar 'd' values (i.e., close positions along their shared normal direction).
@@ -364,15 +339,129 @@ def filter_duplicate_planes(planes, target_axis, d_threshold=1.0):
 
     return keep
 
+def detect_and_correct_pca(pcd):
+    def find_highest_y_peak(pcd, bin_width=0.25, min_count=20):
+        """
+        Find the highest Y-coordinate peak in a point cloud.
+        
+        Args:
+            pcd (o3d.geometry.PointCloud): The input point cloud.
+            bin_width (float): Width of histogram bins along y.
+            min_count (int): Minimum number of points to consider a bin a peak.
+        
+        Returns:
+            peak_y_center (float): The y value at the center of the highest peak bin.
+            count (int): The number of points in that bin.
+        """
+        y_vals = np.asarray(pcd.points)[:, 1]
+        y_min, y_max = np.min(y_vals), np.max(y_vals)
+
+        bins = np.arange(y_min, y_max + bin_width, bin_width)
+        hist, edges = np.histogram(y_vals, bins=bins)
+        
+        filtered_hist = gaussian_filter1d(hist, sigma=3)
+        
+        peak_indices, _ = find_peaks(filtered_hist, height=50)
+        peak_heights = y_vals[peak_indices]
+        
+        # max_peak__height = np.max(peak_heights)
+        
+        peaks_max_idx = np.argmax(peak_heights)
+        original_max_idx = peak_indices[peaks_max_idx]
+        peak_y = y_vals[original_max_idx]
+        
+        
+        # # Only consider bins with a meaningful number of points
+        # peak_idx = None
+        # for i in reversed(range(len(hist))):  # Search from highest y downward
+        #     if hist[i] >= min_count:
+        #         peak_idx = i
+        #         break
+
+        # if peak_idx is None:
+        #     print("No significant peak found.")
+        #     return None, 0
+
+        # peak_y_center = (edges[peak_idx] + edges[peak_idx + 1]) / 2
+        return peak_y
+    
+    def find_y_peak(pcd, bins=50):
+        """
+        Find the y-coordinate with the highest density of points in a point cloud.
+        
+        Parameters:
+        -----------
+        pcd : array-like or object with points attribute
+            Point cloud data. Can be a numpy array of shape (N, 3) or an object
+            with a 'points' attribute (like Open3D point cloud)
+        bins : int, optional
+            Number of bins for the histogram (default: 50)
+        
+        Returns:
+        --------
+        peak_y : float
+            Y-coordinate corresponding to the histogram peak with maximum density
+        """
+        
+        # Extract points from point cloud (handle different input formats)
+        if hasattr(pcd, 'points'):
+            # Handle Open3D point cloud format
+            points = np.asarray(pcd.points)
+        else:
+            # Assume it's already a numpy array
+            points = np.asarray(pcd)
+        
+        # Filter y coordinates into numpy array
+        y_vals = points[:, 1]  # Extract y coordinates (column 1)
+        
+        # Create histogram of y values
+        hist_counts, bin_edges = np.histogram(y_vals, bins=bins)
+        
+        # Calculate bin centers from bin edges
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        # Apply Gaussian filter with sigma=3 to smooth the histogram
+        filtered_hist = gaussian_filter1d(hist_counts.astype(float), sigma=3)
+        
+        # Find the bin center with the maximum count (peak)
+        max_idx = np.argmax(filtered_hist)
+        peak_y = bin_centers[max_idx]
+        
+        return peak_y
+    
+    peak_y = find_y_peak(pcd, bins=200)
+    # peak_y = find_highest_y_peak(pcd)
+    
+    if peak_y < 0:
+        rotation_angle = np.radians(180)
+        axis_angle = np.array([rotation_angle, 0, 0])
+        R_flip = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+        pcd.rotate(R_flip, center=(0,0,0))
+    else:
+        R_flip = None
+        
+    return pcd, R_flip
+    
+    
+
 def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     # Align the point cloud with PCA
-    # pcd, R_pca, centroid = align_point_cloud_with_pca(base_pcd)
     T_translate, R_pca, T_combined, R_3x3, centroid = align_with_pca_separated(base_pcd, is_point_cloud=True)
-    # T_pca, rotation_matrix_manual, centroid = align_with_pca(base_pcd, is_point_cloud=True)
     
     pcd = copy.deepcopy(base_pcd)
     pcd.transform(T_translate)
     pcd.transform(R_pca)
+    
+    # # Visualize the initial PCA alignment
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    # o3d.visualization.draw_geometries([pcd, axis], window_name="Initial PCA Alignment")
+    
+    pcd, R_flip = detect_and_correct_pca(pcd)
+    
+    # if R_flip is not None:
+    #     # Visualize the initial PCA alignment
+    #     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    #     o3d.visualization.draw_geometries([pcd, axis], window_name="Flip Correction of PCA Alignment")
     
     R_pca = R_pca[:3,:3]
     
@@ -449,12 +538,8 @@ def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_thresho
         print(plane)
     time.sleep(2)
     
-    # Combine all for visualization
-    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
-    # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
-    
     filtered_plane_meshes = [plane_meshes[i] for i in retained_idxs]
-    return pcd, filtered_planes, retained_idxs, filtered_plane_meshes, filtered_inlier_clouds, R_pca, R_90X, centroid
+    return pcd, filtered_planes, retained_idxs, filtered_plane_meshes, filtered_inlier_clouds, R_pca, R_90X, R_flip, centroid
 
 def detect_fixture_planes(base_pcd, target_axes):
     keep_planes = []
@@ -462,15 +547,15 @@ def detect_fixture_planes(base_pcd, target_axes):
     keep_inlier_clouds = []
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
     
-    # while len(keep_planes) != 7:
-    while True:
+    while len(keep_planes) != 7:
+    # while True:
         for target_axis in target_axes:
             max_retries = 5
             success = False
         
             for attempt in range(max_retries):
                 try:
-                    pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds, R_PCA, R_90X, centroid = detect_planes(
+                    pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds, R_PCA, R_90X, R_flip, centroid = detect_planes(
                         base_pcd, target_axis=target_axis)
         
                     prev_len = len(filtered_planes)
@@ -523,18 +608,18 @@ def detect_fixture_planes(base_pcd, target_axes):
                     print(f"[Attempt {attempt+1}/{max_retries}] Failed with error: {e}")
         
             if not success:
-                # print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
-                raise Exception(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                # raise Exception(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
                 
                 
-        break
+        # break
     time.sleep(2)
     
     # Combine all for visualization
     o3d.visualization.draw_geometries([pcd, axis] + keep_plane_meshes)
     # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
     
-    return keep_planes, keep_inlier_clouds, pcd, R_PCA, R_90X, centroid
+    return keep_planes, keep_inlier_clouds, pcd, R_PCA, R_90X, R_flip, centroid
             
 
 def normalize_plane_append(plane):
@@ -1526,26 +1611,21 @@ def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
 
     return intersections
 
-if __name__ == "__main__":
-    mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
-    # mesh_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3_point_bend_flat_surfaces.stl"
+def create_model(fixture_scan_path, specimen_scan_path, output_path):
+    # mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
     print("Loading mesh...")
-    base_pcd = load_mesh_as_point_cloud(mesh_path)
+    base_pcd = load_mesh_as_point_cloud(fixture_scan_path)
     
     target_axes = [[0, 0, 1],
                    [1, 0, 0],
                    [np.sqrt(3)/2, 0, -0.5],
                    [-np.sqrt(3)/2, 0, -0.5]]
     
-    supports_distance = 127.66
+    # supports_distance = 127.66
     
-    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, centroid = detect_fixture_planes(base_pcd, target_axes)
-    
-    # o3d.visualization.draw_geometries([aligned_pcd] + keep_inlier_clouds, window_name='Keep Inlier Clouds')
+    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = detect_fixture_planes(base_pcd, target_axes)
     
     optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
-    
-    # o3d.visualization.draw_geometries([aligned_pcd] + optimized_planes, window_name='Optimized_Planes')
     
     # Verification of constraints
     print("")
@@ -1607,63 +1687,32 @@ if __name__ == "__main__":
     
     print(f'\nPlane adjustment R matrix:\n{R_planes}')
     
-    R_total = R_planes @ R_90X @ R_pca
+    if R_flip is not None:
+        R_total = R_planes @ R_90X @ R_flip @ R_pca
+    else:
+        R_total = R_planes @ R_90X @ R_pca
     
     print(f'\nR Total:\n{R_total}')
     
-    # # Apply the R rotation matrix to the original mesh
-    # test_mesh = load_mesh(mesh_path)
-    # test_mesh_rotated = test_mesh.rotate(R, center=(0,0,0))
-    
-    # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
-    # matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
-    
-    # aligned_specimen_mesh = align_tgt_to_ref_meshes(test_mesh_rotated, matched_specimen_mesh)
-    
     # === STEP 1: Load the original mesh ===
-    original_mesh = load_mesh(mesh_path)
+    original_mesh = load_mesh(fixture_scan_path)
     original_vertices = np.asarray(original_mesh.vertices)
-    # centroid = original_vertices.mean(axis=0)
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
-    # o3d.visualization.draw_geometries([
-    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-    #     original_mesh.paint_uniform_color([1, 0, 0]),
-    #     axis], window_name="Reference Mesh As Loaded")
     
     # === STEP 2: Translate to origin ===
     original_mesh.translate(-centroid)
-    # o3d.visualization.draw_geometries([
-    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-    #     original_mesh.paint_uniform_color([1, 0, 0]),
-    #     axis], window_name="Reference Mesh Translated to Centroid")
     
     # === STEP 3: PCA alignment ===
-    # pca = PCA(n_components=3)
-    # pca.fit(np.asarray(original_mesh.vertices))
-    # ordered_axes = pca.components_[np.argsort(pca.explained_variance_)[::-1]]
-    # R_pca = ordered_axes.T @ np.eye(3)
     original_mesh.rotate(R_pca, center=(0, 0, 0))
-    # o3d.visualization.draw_geometries([
-    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-    #     original_mesh.paint_uniform_color([1, 0, 0]),
-    #     axis], window_name="Reference Mesh Rotated by PCA Matrix")
+    
+    if R_flip is not None:
+        original_mesh.rotate(R_flip, center=(0, 0, 0))
     
     # === STEP 4: Rotate 90° about +X ===
-    # rotation_angle_rad = np.radians(90)
-    # axis_angle = np.array([rotation_angle_rad, 0, 0])
-    # R_90X = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
     original_mesh.rotate(R_90X, center=(0, 0, 0))
-    # o3d.visualization.draw_geometries([
-    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-    #     original_mesh.paint_uniform_color([1, 0, 0]),
-    #     axis], window_name="Reference Mesh Rotated by PCA Matrix and 90 Degrees +X")
     
     # === STEP 5: Apply final minimal rotation matrix R ===
     original_mesh.rotate(R_planes, center=(0, 0, 0))
-    # o3d.visualization.draw_geometries([
-    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-    #     original_mesh.paint_uniform_color([1, 0, 0]),
-    #     axis], window_name="Reference Mesh Rotated by PCA Matrix, 90 Degrees +X, and Fine Adjustment")
     
     # === RESULT ===
     transformed_reference_mesh = original_mesh
@@ -1673,27 +1722,9 @@ if __name__ == "__main__":
         transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
         axis], window_name="Transformed Reference Mesh")
 
-    
-    
-    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
-    # transformed_reference_mesh.paint_uniform_color([1, 0, 0])
-    # o3d.visualization.draw_geometries(
-    #     [transformed_reference_mesh, axis],
-    #     window_name="Transformed Mesh")
-    
-    
-    
-    # transformed_reference_mesh = o3d.geometry.TriangleMesh()
-    # transformed_reference_mesh.vertices = o3d.utility.Vector3dVector(rotated_vertices)
-    # transformed_reference_mesh.triangles = original_mesh.triangles
-    # transformed_reference_mesh.compute_vertex_normals()
-    
-    # Optionally: Save or visualize it
-    # o3d.io.write_triangle_mesh("transformed_reference.stl", transformed_reference_mesh)
-    
     # Load and align matched specimen
-    matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
-    matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
+    # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    matched_specimen_mesh = load_mesh(specimen_scan_path)
     
     aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
     
@@ -1736,22 +1767,12 @@ if __name__ == "__main__":
     
     r_support_mesh = trimesh_to_open3d(r_support)
     
-    
-    
-    
-    
-    # # Perform final alignment so supports are aligned to WCS
-    # aligned_pcd_rot, l_support_rot, r_support_rot, anvil_rot = align_supports_to_Y_axis_and_Z0(aligned_pcd, l_support, r_support, anvil)
-    
     # Create coordinate frame
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0,0,0])
 
     # Visualize optimized planes and the inlier clouds used for fitting
-    # o3d.visualization.draw_geometries(keep_inlier_clouds + [axis] + optimized_plane_meshes + [l_support_mesh], window_name="Optimized Planes")
     cylinder_meshes = [anvil_mesh, l_support_mesh, r_support_mesh]
-    # cylinder_meshes_aligned = [trimesh_to_open3d(mesh) for mesh in cylinder_meshes]
     o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
-    # o3d.visualization.draw_geometries(keep_inlier_clouds + [axis] + optimized_plane_meshes + cylinder_meshes, window_name="Optimized Planes")
     
     anvil = ensure_normals_outward(anvil, mesh_name="anvil")
     l_support = ensure_normals_outward(l_support, mesh_name="left_support")
@@ -1798,40 +1819,269 @@ if __name__ == "__main__":
         else:
             print("Warning: Maximum adjustment iterations reached, intersection may still exist.")
     
+    # Adjust for good measure
+    n_increments = 2
+    anvil.apply_translation([0, 0, n_increments*increment])
+    l_support.apply_translation([0, 0, -n_increments*increment])
+    r_support.apply_translation([0, 0, -n_increments*increment])
     
     merged_mesh = trimesh.util.concatenate(all_meshes)
     
-    output_filepath = "E:/Fixture Scans/prepared_test.stl"
-    merged_mesh.export(output_filepath)
+    # output_filepath = "E:/Fixture Scans/prepared_test.stl"
+    merged_mesh.export(output_path)
+
+def create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_folder):
+    df_test_data = pd.read_excel(test_data_filepath)
+    os.makedirs(prepared_meshes_folder, exist_ok=True)
+    
+    # Iterate through df_test_data and create the necessary multibody STL files for simulation
+    for index, row in df_test_data.iterrows():
+        fixture_scan_filename = row["Fixture Scan File"]
+        fixture_scan_path = os.path.join(scanned_meshes_folder, fixture_scan_filename)
+        
+        specimen_scan_filename = row["Specimen Scan File"]
+        specimen_scan_path = os.path.join(scanned_meshes_folder, specimen_scan_filename)
+        
+        specimen = row["Specimen"]
+        test_num = row["Test_Num"]
+        output_filename = f"{specimen}_{test_num}.stl"
+        output_path = os.path.join(prepared_meshes_folder, output_filename)
+        create_model(fixture_scan_path, specimen_scan_path, output_path)
+        
+        # Save the job name and add it to test_data.xlsx
+        job_name = f"{specimen}_{test_num}"
+        df_test_data.loc[index, "Job Name"] = job_name
+        
+        # Save the test specific mesh file name and add it to test_data.xlsx
+        df_test_data.loc[index, "Test Specific Mesh File"] = output_path
+        
+        print(f"{output_filename} model and job creation complete")
+        
+    # Export changed dataframe
+    df_test_data.to_excel(test_data_filepath, index=False)
+        
+    
+
+if __name__ == "__main__":
+    # test_data_filepath = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    # scanned_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    # prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
+    
+    # create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_folder)
     
     
-    # NEXT STEPS:
-    # * Use the known relative angles and positions of the found datum planes
-    #   to adjust the found datum planes into perfect relative position, while
-    #   optimizing for the best fit of the scan data. ******DONE******
+    fixture_scan_path = "E:/Fixture Scans/X2_1_Fixture.stl"
+    specimen_scan_path = "E:/Fixture Scans/X2_positive_quad.stl"
+    output_path = "E:/Fixture Scans/X2_Test1.stl"
     
-    # * Use known distances between datum faces to adjust placement (25 mm
-    #   between vertical faces on the anvil - let the supports be where the
-    #   scan indicates) ******DONE******
+    create_model(fixture_scan_path, specimen_scan_path, output_path)
     
-    # * Use the datum planes to determine the location of the supports and
-    #   anvil. The anvil should be allowed to be at a slightly different angle
-    #   than the supports, but it should have its axis in a plane parallel to
-    #   the XY plane.
     
-    # * Adjust the entire point cloud and the fit cylinders so the fit supports
-    #   have identical Z coordinates and their axes are parallel to the XY plane.
-    #   Place one of the centers of a support at the origin. Since we are not
-    #   assuming that the anvil is parallel to the supports, we do not use this
-    #   as a locating feature as before.
     
-    # * Align the corresponding full specimen mesh to the scanned portion of
-    #   the specimen in the test setup scan.
+    # mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
+    # print("Loading mesh...")
+    # base_pcd = load_mesh_as_point_cloud(mesh_path)
     
-    # * Ensure there are no intersections between the specimen mesh and the
-    #   support or anvil meshes. Adjust positions in the Z axis if necessary,
-    #   but only by the minimum amount.
+    # target_axes = [[0, 0, 1],
+    #                [1, 0, 0],
+    #                [np.sqrt(3)/2, 0, -0.5],
+    #                [-np.sqrt(3)/2, 0, -0.5]]
     
-    # * Export the aligned specimen, anvil, left support, and right support as
-    #   a new mesh.
+    # supports_distance = 127.66
+    
+    # keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, centroid = detect_fixture_planes(base_pcd, target_axes)
+    
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
+    
+    # # Verification of constraints
+    # print("")
+    # for combo in combinations(range(len(optimized_planes)), 2):
+    #     n1 = optimized_planes[combo[0]][:3]
+    #     n2 = optimized_planes[combo[1]][:3]
+    #     angle_diff = angular_change_between_normals(n1, n2)
+        
+    #     # Check if the current combo contains X-oriented planes
+    #     set_combo = set(combo)
+    #     set_x_plane_indices = set(x_plane_indices)
+        
+    #     common_elements = list(set_combo.intersection(set_x_plane_indices))
+        
+    #     labels = []
+    #     for ele in common_elements:
+    #         x_plane_pos = x_plane_indices.index(ele)
+    #         if x_plane_pos == 0:
+    #             labels.append("Left Support")
+    #         elif x_plane_pos == 1:
+    #             labels.append("Left Side Anvil")
+    #         elif x_plane_pos == 2:
+    #             labels.append("Right Side Anvil")
+    #         elif x_plane_pos == 3:
+    #             labels.append("Right Support")
+    #         else:
+    #             raise ValueError("Index out of range")
+            
+    #     if len(common_elements) == 2:
+    #         print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} ({labels[1]}) are separated by {angle_diff:.4f} degrees')
+    #     elif len(common_elements) == 1:
+    #         if combo[0] in common_elements:
+    #             print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} are separated by {angle_diff:.4f} degrees')
+    #         else:
+    #             print(f'Planes {combo[0]} and {combo[1]} ({labels[0]}) are separated by {angle_diff:.4f} degrees')                
+    #     else:
+    #         print(f'Planes {combo[0]} and {combo[1]} are separated by {angle_diff:.4f} degrees')
+        
+    #     if np.abs(np.around(angle_diff,2)) <= 0.01:
+    #         separation_dist = separation_between_parallel_planes(optimized_planes[combo[0]], optimized_planes[combo[1]])
+    #         print(f'\tPlanes {combo[0]} and {combo[1]} are separated by a distance of {separation_dist}')
+    
+    
+    # # Re-align everything so the support planes and base plane define the world orientation
+    # planeX_idx = x_plane_indices[0]
+    # planeZ_idx = 0
+    # planeX = optimized_planes[planeX_idx]
+    # planeZ = optimized_planes[planeZ_idx]
+    
+    # # Perform alignment
+    # rotated_pcd, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
+    #     aligned_pcd, optimized_planes, planeX, planeZ
+    # )
+    
+    # # Validate results
+    # success, error_X, error_Z, total_angle = validate_minimal_rotation(
+    #     optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R_planes
+    # )    
+    
+    # print(f'\nPlane adjustment R matrix:\n{R_planes}')
+    
+    # R_total = R_planes @ R_90X @ R_pca
+    
+    # print(f'\nR Total:\n{R_total}')
+    
+    # # === STEP 1: Load the original mesh ===
+    # original_mesh = load_mesh(mesh_path)
+    # original_vertices = np.asarray(original_mesh.vertices)
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
+    
+    # # === STEP 2: Translate to origin ===
+    # original_mesh.translate(-centroid)
+    
+    # # === STEP 3: PCA alignment ===
+    # original_mesh.rotate(R_pca, center=(0, 0, 0))
+    
+    # # === STEP 4: Rotate 90° about +X ===
+    # original_mesh.rotate(R_90X, center=(0, 0, 0))
+    
+    # # === STEP 5: Apply final minimal rotation matrix R ===
+    # original_mesh.rotate(R_planes, center=(0, 0, 0))
+    
+    # # === RESULT ===
+    # transformed_reference_mesh = original_mesh
+    
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Transformed Reference Mesh")
+
+    # # Load and align matched specimen
+    # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    # matched_specimen_mesh = load_mesh(matched_specimen_scan_path)
+    
+    # aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
+    
+    # #### Create mesh models of support and anvil cylinders
+    # diameter = 10
+    # height = 40
+    
+    # base_plane = rotated_planes[0]
+    # base_support_offset = 52
+    
+    # support_offset = 25.4   # 1 inch
+    
+    # anvil_plane1 = rotated_planes[5]
+    # anvil_plane2 = rotated_planes[6]
+    # anvil = create_cylinder_relative_to_planes(anvil_plane1,
+    #                                         anvil_plane2,
+    #                                         0,
+    #                                         0,
+    #                                         diameter,
+    #                                         height)
+    # anvil_mesh = trimesh_to_open3d(anvil)
+    
+    # l_support_plane = rotated_planes[x_plane_indices[0]]
+    # l_support_plane_offset = support_offset
+    # l_support = create_cylinder_relative_to_planes(
+    #                 base_plane, l_support_plane,
+    #                 base_support_offset,
+    #                 l_support_plane_offset,
+    #                 diameter, height)
+    
+    # l_support_mesh = trimesh_to_open3d(l_support)
+    
+    # r_support_plane = rotated_planes[x_plane_indices[3]]
+    # r_support_plane_offset = -support_offset
+    # r_support = create_cylinder_relative_to_planes(
+    #                 base_plane, r_support_plane,
+    #                 base_support_offset,
+    #                 r_support_plane_offset,
+    #                 diameter, height)
+    
+    # r_support_mesh = trimesh_to_open3d(r_support)
+    
+    # # Create coordinate frame
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0,0,0])
+
+    # # Visualize optimized planes and the inlier clouds used for fitting
+    # cylinder_meshes = [anvil_mesh, l_support_mesh, r_support_mesh]
+    # o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
+    
+    # anvil = ensure_normals_outward(anvil, mesh_name="anvil")
+    # l_support = ensure_normals_outward(l_support, mesh_name="left_support")
+    # r_support = ensure_normals_outward(r_support, mesh_name="right_support")
+    # flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh")
+    
+    # # Combine meshes
+    # all_meshes = [flex_mesh, anvil, l_support, r_support]
+    
+    # intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    
+    # increment = 0.01  # Adjust the movement step as needed
+    # max_iterations = 100  # Prevent infinite loops
+    
+    # if intersecting_indices:
+    #     for _ in range(max_iterations):
+    #         still_intersecting = False
+    
+    #         # Check and resolve intersection with anvil
+    #         if all_meshes.index(anvil) in intersecting_indices:
+    #             # Move anvil up in Z
+    #             anvil.apply_translation([0, 0, increment])
+    #             print(f"Applying {increment} adjustment to Z position of anvil")
+    #             # Recheck
+    #             updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    #             if all_meshes.index(anvil) in updated:
+    #                 still_intersecting = True
+    
+    #         # Check and resolve intersection with supports
+    #         l_idx = all_meshes.index(l_support)
+    #         r_idx = all_meshes.index(r_support)
+    #         if l_idx in intersecting_indices or r_idx in intersecting_indices:
+    #             # Move both supports down in Z
+    #             l_support.apply_translation([0, 0, -increment])
+    #             r_support.apply_translation([0, 0, -increment])
+    #             print(f"Applying -{increment} adjustment to Z position of supports")
+    #             # Recheck
+    #             updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    #             if l_idx in updated or r_idx in updated:
+    #                 still_intersecting = True
+    
+    #         if not still_intersecting:
+    #             break
+    #     else:
+    #         print("Warning: Maximum adjustment iterations reached, intersection may still exist.")
+    
+    
+    # merged_mesh = trimesh.util.concatenate(all_meshes)
+    
+    # output_filepath = "E:/Fixture Scans/prepared_test.stl"
+    # merged_mesh.export(output_filepath)
     
