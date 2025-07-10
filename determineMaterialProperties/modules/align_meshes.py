@@ -15,9 +15,82 @@ def load_and_sample(filepath, num_points=5000):
     pcd = mesh.sample_points_uniformly(number_of_points=num_points)
     return mesh, pcd
 
+# def load_mesh(filepath):
+#     mesh = o3d.io.read_triangle_mesh(filepath)
+#     mesh.compute_vertex_normals()
+#     return mesh
+
 def load_mesh(filepath):
+    """
+    Load a mesh from file and ensure all normals point outward.
+    
+    Parameters:
+    - filepath: Path to the mesh file
+    
+    Returns:
+    - Open3D TriangleMesh with outward-facing normals
+    """
     mesh = o3d.io.read_triangle_mesh(filepath)
-    mesh.compute_vertex_normals()
+    
+    # Check if mesh loaded successfully
+    if len(mesh.vertices) == 0:
+        raise ValueError(f"Failed to load mesh from {filepath}")
+    
+    # # Remove degenerate triangles and duplicated vertices
+    # mesh.remove_degenerate_triangles()
+    # mesh.remove_duplicated_triangles()
+    # mesh.remove_duplicated_vertices()
+    # mesh.remove_non_manifold_edges()
+    
+    # Ensure consistent triangle orientation (outward normals)
+    # This works best for closed, manifold meshes
+    try:
+        mesh.orient_triangles()
+        print("[INFO] Triangle orientation corrected")
+    except Exception as e:
+        print(f"[WARNING] Could not orient triangles automatically: {e}")
+    
+    
+    # Optional: If you know the mesh should be a closed surface,
+    # you can verify and potentially fix orientation using this approach:
+    if mesh.is_watertight():
+        # Compute vertex normals after orientation
+        mesh.compute_vertex_normals()
+        
+        # For additional robustness, you can also compute triangle normals
+        mesh.compute_triangle_normals()
+        print("[INFO] Mesh is watertight - normals should be correctly oriented")
+    else:
+        print("[WARNING] Mesh is not watertight - normal orientation may be inconsistent")
+        
+        # Alternative approach for non-watertight meshes:
+        # Try to orient normals based on majority direction or centroid
+        try:
+            # Get mesh centroid
+            centroid = mesh.get_center()
+            vertices = np.asarray(mesh.vertices)
+            normals = np.asarray(mesh.vertex_normals)
+            
+            # For each vertex, check if normal points away from centroid
+            vectors_to_centroid = centroid - vertices
+            dot_products = np.sum(normals * vectors_to_centroid, axis=1)
+            
+            # If majority of normals point toward centroid, flip all normals
+            inward_count = np.sum(dot_products > 0)
+            total_count = len(dot_products)
+            
+            if inward_count > total_count / 2:
+                print("[INFO] Flipping normals to point outward from centroid")
+                # Flip triangle orientation
+                triangles = np.asarray(mesh.triangles)
+                mesh.triangles = o3d.utility.Vector3iVector(triangles[:, [0, 2, 1]])
+                # Recompute normals
+                mesh.compute_vertex_normals()
+                mesh.compute_triangle_normals()
+                
+        except Exception as e:
+            print(f"[WARNING] Could not apply centroid-based normal correction: {e}")
+    
     return mesh
 
 def mesh_to_pcd(mesh, num_points=5000):

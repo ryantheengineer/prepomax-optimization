@@ -14,6 +14,7 @@ import copy
 from scipy.spatial import cKDTree
 import pandas as pd
 import os
+import fixture_plane_fitting
 
 def load_mesh_as_point_cloud(mesh_path):
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -442,7 +443,37 @@ def detect_and_correct_pca(pcd):
         
     return pcd, R_flip
     
+def prepare_scan_orientation(base_pcd, is_point_cloud=True):
+    # Align the point cloud with PCA
+    T_translate, R_pca, T_combined, R_3x3, centroid = align_with_pca_separated(base_pcd, is_point_cloud=True)
     
+    pcd = copy.deepcopy(base_pcd)
+    pcd.transform(T_translate)
+    pcd.transform(R_pca)
+    
+    # # Visualize the initial PCA alignment
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    # o3d.visualization.draw_geometries([pcd, axis], window_name="Initial PCA Alignment")
+    
+    pcd, R_flip = detect_and_correct_pca(pcd)
+    
+    # if R_flip is not None:
+    #     # Visualize the initial PCA alignment
+    #     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    #     o3d.visualization.draw_geometries([pcd, axis], window_name="Flip Correction of PCA Alignment")
+    
+    R_pca = R_pca[:3,:3]
+    
+    print(f'\nPCA Rotation Matrix:\n{R_pca}')
+    print(f'PCA Centroid:\t{centroid}')
+    
+    # Rotate the point cloud about X so the greatest variation aligns with Z
+    rotation_angle = np.radians(90)
+    axis_angle = np.array([rotation_angle, 0, 0])
+    R_90X = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_angle)
+    pcd.rotate(R_90X, center=(0,0,0))
+    
+    return pcd, R_pca, R_90X, R_flip, centroid
 
 def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
     # Align the point cloud with PCA
@@ -541,86 +572,819 @@ def detect_planes(base_pcd, target_axis=[1, 0, 0], angle_deg=3, distance_thresho
     filtered_plane_meshes = [plane_meshes[i] for i in retained_idxs]
     return pcd, filtered_planes, retained_idxs, filtered_plane_meshes, filtered_inlier_clouds, R_pca, R_90X, R_flip, centroid
 
+# def detect_fixture_planes(base_pcd, target_axes):
+#     keep_planes = []
+#     keep_plane_meshes = []
+#     keep_inlier_clouds = []
+#     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
+    
+#     while len(keep_planes) != 7:
+#     # while True:
+#         for target_axis in target_axes:
+#             max_retries = 5
+#             success = False
+        
+#             for attempt in range(max_retries):
+#                 try:
+#                     pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds, R_PCA, R_90X, R_flip, centroid = detect_planes(
+#                         base_pcd, target_axis=target_axis)
+        
+#                     prev_len = len(filtered_planes)
+        
+#                     tmp_planes = []
+#                     tmp_meshes = []
+#                     tmp_clouds = []
+        
+#                     if target_axis == [0, 0, 1]:
+#                         # base_plane = max(filtered_planes, key=lambda x: x[3])
+#                         # base_idx = filtered_planes.index(base_plane)
+                        
+#                         base_idx = max(range(len(filtered_planes)), key=lambda i: filtered_planes[i][3])
+#                         base_plane = filtered_planes[base_idx]
+                        
+#                         # original_idx = retained_idxs[base_idx]
+        
+#                         tmp_planes.append(base_plane)
+#                         tmp_meshes.append(plane_meshes[base_idx])
+#                         tmp_clouds.append(filtered_inlier_clouds[base_idx])
+        
+#                     elif target_axis == [1, 0, 0]:
+#                         if len(filtered_planes) > 4:
+#                             filtered_planes = filter_duplicate_planes(filtered_planes, target_axis)
+#                             print(f'Further filtered from {prev_len} to {len(filtered_planes)} planes')
+        
+#                         if len(filtered_planes) == 4:
+#                             for i, plane in enumerate(filtered_planes):
+#                                 tmp_planes.append(plane)
+#                                 tmp_meshes.append(plane_meshes[retained_idxs[i]])
+#                                 tmp_clouds.append(filtered_inlier_clouds[retained_idxs[i]])
+#                         else:
+#                             raise ValueError(f"Expected 4 planes detected, but found {len(filtered_planes)}")
+        
+#                     else:
+#                         for i, plane in enumerate(filtered_planes):
+#                             tmp_planes.append(plane)
+#                             tmp_meshes.append(plane_meshes[retained_idxs[i]])
+#                             tmp_clouds.append(filtered_inlier_clouds[retained_idxs[i]])
+        
+#                     # All good, commit results
+#                     keep_planes.extend(tmp_planes)
+#                     keep_plane_meshes.extend(tmp_meshes)
+#                     keep_inlier_clouds.extend(tmp_clouds)
+        
+#                     success = True
+#                     break
+        
+#                 except Exception as e:
+#                     print(f"[Attempt {attempt+1}/{max_retries}] Failed with error: {e}")
+        
+#             if not success:
+#                 print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+#                 # raise Exception(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                
+                
+#         # break
+#     time.sleep(2)
+    
+#     # Combine all for visualization
+#     o3d.visualization.draw_geometries([pcd, axis] + keep_plane_meshes)
+#     # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
+    
+#     return keep_planes, keep_inlier_clouds, pcd, R_PCA, R_90X, R_flip, centroid
+
 def detect_fixture_planes(base_pcd, target_axes):
+    # Define expected number of planes per axis
+    expected_planes = {
+        str([0, 0, 1]): 1,
+        str([1, 0, 0]): 4,
+        str([np.sqrt(3)/2, 0, -0.5]): 1,
+        str([-np.sqrt(3)/2, 0, -0.5]): 1
+    }
+    
     keep_planes = []
     keep_plane_meshes = []
     keep_inlier_clouds = []
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0, 0, 0])
     
-    while len(keep_planes) != 7:
-    # while True:
-        for target_axis in target_axes:
-            max_retries = 5
-            success = False
+    max_overall_retries = 10
+    overall_attempt = 0
+    
+    while overall_attempt < max_overall_retries:
+        overall_attempt += 1
+        print(f"\n=== Overall attempt {overall_attempt}/{max_overall_retries} ===")
         
+        # Reset for each overall attempt
+        current_planes = []
+        current_meshes = []
+        current_clouds = []
+        all_axes_successful = True
+        
+        for target_axis in target_axes:
+            axis_key = str(target_axis)
+            expected_count = expected_planes[axis_key]
+            
+            max_retries = 5
+            axis_success = False
+            
+            print(f"\nProcessing axis {target_axis}, expecting {expected_count} planes")
+            
             for attempt in range(max_retries):
                 try:
                     pcd, filtered_planes, retained_idxs, plane_meshes, filtered_inlier_clouds, R_PCA, R_90X, R_flip, centroid = detect_planes(
                         base_pcd, target_axis=target_axis)
-        
+                    
                     prev_len = len(filtered_planes)
-        
-                    tmp_planes = []
-                    tmp_meshes = []
-                    tmp_clouds = []
-        
+                    
+                    # Process based on target axis
                     if target_axis == [0, 0, 1]:
-                        # base_plane = max(filtered_planes, key=lambda x: x[3])
-                        # base_idx = filtered_planes.index(base_plane)
-                        
-                        base_idx = max(range(len(filtered_planes)), key=lambda i: filtered_planes[i][3])
-                        base_plane = filtered_planes[base_idx]
-                        
-                        # original_idx = retained_idxs[base_idx]
-        
-                        tmp_planes.append(base_plane)
-                        tmp_meshes.append(plane_meshes[base_idx])
-                        tmp_clouds.append(filtered_inlier_clouds[base_idx])
-        
-                    elif target_axis == [1, 0, 0]:
-                        if len(filtered_planes) > 4:
-                            filtered_planes = filter_duplicate_planes(filtered_planes, target_axis)
-                            print(f'Further filtered from {prev_len} to {len(filtered_planes)} planes')
-        
-                        if len(filtered_planes) == 4:
-                            for i, plane in enumerate(filtered_planes):
-                                tmp_planes.append(plane)
-                                tmp_meshes.append(plane_meshes[retained_idxs[i]])
-                                tmp_clouds.append(filtered_inlier_clouds[retained_idxs[i]])
+                        if len(filtered_planes) >= 1:
+                            # Select the base plane (highest d value)
+                            base_idx = max(range(len(filtered_planes)), key=lambda i: filtered_planes[i][3])
+                            selected_planes = [filtered_planes[base_idx]]
+                            selected_meshes = [plane_meshes[base_idx]]
+                            selected_clouds = [filtered_inlier_clouds[base_idx]]
                         else:
-                            raise ValueError(f"Expected 4 planes detected, but found {len(filtered_planes)}")
-        
-                    else:
-                        for i, plane in enumerate(filtered_planes):
-                            tmp_planes.append(plane)
-                            tmp_meshes.append(plane_meshes[retained_idxs[i]])
-                            tmp_clouds.append(filtered_inlier_clouds[retained_idxs[i]])
-        
-                    # All good, commit results
-                    keep_planes.extend(tmp_planes)
-                    keep_plane_meshes.extend(tmp_meshes)
-                    keep_inlier_clouds.extend(tmp_clouds)
-        
-                    success = True
+                            raise ValueError(f"Expected at least 1 plane for Z-axis, found {len(filtered_planes)}")
+                    
+                    elif target_axis == [1, 0, 0]:
+                        # Apply additional filtering if too many planes
+                        if len(filtered_planes) > 4:
+                            filtered_planes_extra = filter_duplicate_planes(filtered_planes, target_axis)
+                            print(f'Further filtered from {prev_len} to {len(filtered_planes_extra)} planes')
+                            
+                            if len(filtered_planes_extra) == 4:
+                                selected_planes = filtered_planes_extra
+                                # Map back to original indices
+                                selected_meshes = []
+                                selected_clouds = []
+                                for filtered_plane in filtered_planes_extra:
+                                    # Find the index of this plane in the original filtered_planes
+                                    for i, orig_plane in enumerate(filtered_planes):
+                                        if np.allclose(filtered_plane, orig_plane, atol=1e-6):
+                                            selected_meshes.append(plane_meshes[i])
+                                            selected_clouds.append(filtered_inlier_clouds[i])
+                                            break
+                            else:
+                                raise ValueError(f"Expected 4 planes for X-axis after extra filtering, found {len(filtered_planes_extra)}")
+                        elif len(filtered_planes) == 4:
+                            selected_planes = filtered_planes
+                            selected_meshes = plane_meshes
+                            selected_clouds = filtered_inlier_clouds
+                        else:
+                            raise ValueError(f"Expected 4 planes for X-axis, found {len(filtered_planes)}")
+                    
+                    else:  # Angled axes
+                        if len(filtered_planes) >= 1:
+                            # For angled axes, take the first plane or the one with best alignment
+                            target_axis_norm = np.array(target_axis) / np.linalg.norm(target_axis)
+                            best_idx = max(range(len(filtered_planes)), 
+                                         key=lambda i: abs(np.dot(filtered_planes[i][:3] / np.linalg.norm(filtered_planes[i][:3]), target_axis_norm)))
+                            selected_planes = [filtered_planes[best_idx]]
+                            selected_meshes = [plane_meshes[best_idx]]
+                            selected_clouds = [filtered_inlier_clouds[best_idx]]
+                        else:
+                            raise ValueError(f"Expected at least 1 plane for axis {target_axis}, found {len(filtered_planes)}")
+                    
+                    # Validate we got the expected number
+                    if len(selected_planes) != expected_count:
+                        raise ValueError(f"Expected {expected_count} planes for axis {target_axis}, got {len(selected_planes)}")
+                    
+                    # If we get here, this axis was successful
+                    current_planes.extend(selected_planes)
+                    current_meshes.extend(selected_meshes)
+                    current_clouds.extend(selected_clouds)
+                    
+                    print(f"✓ Successfully found {len(selected_planes)} planes for axis {target_axis}")
+                    axis_success = True
                     break
-        
+                    
                 except Exception as e:
-                    print(f"[Attempt {attempt+1}/{max_retries}] Failed with error: {e}")
+                    print(f"[Attempt {attempt+1}/{max_retries}] Failed for axis {target_axis}: {e}")
+            
+            if not axis_success:
+                print(f"✗ Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
+                all_axes_successful = False
+                break  # Break out of axis loop
         
-            if not success:
-                print(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
-                # raise Exception(f"Failed to detect valid planes for axis {target_axis} after {max_retries} attempts.")
-                
-                
-        # break
-    time.sleep(2)
+        if all_axes_successful:
+            # All axes were successful, commit the results
+            keep_planes = current_planes
+            keep_plane_meshes = current_meshes
+            keep_inlier_clouds = current_clouds
+            
+            total_planes = len(keep_planes)
+            print(f"\n✓ SUCCESS: Found all required planes. Total: {total_planes}")
+            print(f"Distribution: Z={sum(1 for i, axis in enumerate(target_axes) if axis == [0, 0, 1])}, "
+                  f"X={sum(1 for i, axis in enumerate(target_axes) if axis == [1, 0, 0]) * 4}, "
+                  f"Others={sum(1 for axis in target_axes if axis not in [[0, 0, 1], [1, 0, 0]])}")
+            break
+        else:
+            print(f"✗ Overall attempt {overall_attempt} failed. Retrying...")
     
-    # Combine all for visualization
+    if overall_attempt >= max_overall_retries:
+        raise Exception(f"Failed to detect all required planes after {max_overall_retries} overall attempts.")
+    
+    # Visualization
+    time.sleep(2)
     o3d.visualization.draw_geometries([pcd, axis] + keep_plane_meshes)
-    # o3d.visualization.draw_geometries([pcd, axis] + [plane_meshes[i] for i in retained_idxs])
     
     return keep_planes, keep_inlier_clouds, pcd, R_PCA, R_90X, R_flip, centroid
             
+
+
+
+
+
+
+
+
+
+
+class EfficientPlaneDetector:
+    def __init__(self, distance_threshold=0.1, ransac_n=3, num_iterations=1000):
+        self.distance_threshold = distance_threshold
+        self.ransac_n = ransac_n
+        self.num_iterations = num_iterations
+        
+    def detect_all_planes_simultaneously(self, pcd, target_axes, expected_counts):
+        """
+        Strategy 1: Detect all planes at once, then assign to axes
+        Most efficient for dense point clouds with many planes
+        """
+        print("=== Strategy 1: Simultaneous Detection ===")
+        
+        # Step 1: Detect ALL planes in the point cloud
+        all_planes = []
+        all_inliers = []
+        pcd_working = pcd.select_by_index([], invert=True)  # clone
+        
+        max_total_planes = sum(expected_counts.values()) + 5  # buffer for extras
+        
+        for i in range(max_total_planes):
+            if len(pcd_working.points) < self.ransac_n:
+                break
+                
+            plane_model, inliers = pcd_working.segment_plane(
+                distance_threshold=self.distance_threshold,
+                ransac_n=self.ransac_n,
+                num_iterations=self.num_iterations
+            )
+            
+            if len(inliers) < 50:  # minimum points for valid plane
+                break
+                
+            all_planes.append(plane_model)
+            all_inliers.append(inliers)
+            pcd_working = pcd_working.select_by_index(inliers, invert=True)
+        
+        print(f"Detected {len(all_planes)} total planes")
+        
+        # Step 2: Assign planes to target axes based on normal alignment
+        axis_assignments = self._assign_planes_to_axes(all_planes, target_axes, expected_counts)
+        
+        return axis_assignments, all_planes, all_inliers
+    
+    def detect_with_adaptive_parameters(self, pcd, target_axes, expected_counts):
+        """
+        Strategy 2: Adaptive parameter tuning per axis
+        Adjusts RANSAC parameters based on expected number of planes
+        """
+        print("=== Strategy 2: Adaptive Parameters ===")
+        
+        results = {}
+        
+        for axis, expected_count in expected_counts.items():
+            target_axis = eval(axis)  # Convert string back to list
+            print(f"\nProcessing axis {target_axis}, expecting {expected_count} planes")
+            
+            # Adaptive parameters based on expected count
+            if expected_count == 1:
+                # For single planes, be more permissive
+                distance_thresh = self.distance_threshold * 1.5
+                iterations = self.num_iterations // 2
+            elif expected_count == 4:
+                # For multiple planes, be more strict
+                distance_thresh = self.distance_threshold * 0.8
+                iterations = self.num_iterations * 2
+            else:
+                distance_thresh = self.distance_threshold
+                iterations = self.num_iterations
+            
+            # Detect planes for this axis
+            planes = self._detect_planes_for_axis(
+                pcd, target_axis, expected_count, 
+                distance_thresh, iterations
+            )
+            
+            results[axis] = planes
+            
+        return results
+    
+    def detect_with_region_growing(self, pcd, target_axes, expected_counts):
+        """
+        Strategy 3: Region growing approach
+        More robust for noisy data or partial planes
+        """
+        print("=== Strategy 3: Region Growing ===")
+        
+        # Convert to numpy for easier manipulation
+        points = np.asarray(pcd.points)
+        normals = np.asarray(pcd.normals) if pcd.has_normals() else None
+        
+        if normals is None:
+            pcd.estimate_normals()
+            normals = np.asarray(pcd.normals)
+        
+        results = {}
+        used_points = set()
+        
+        for axis, expected_count in expected_counts.items():
+            target_axis = np.array(eval(axis))
+            target_axis = target_axis / np.linalg.norm(target_axis)
+            
+            # Find candidate points aligned with this axis
+            alignments = np.abs(np.dot(normals, target_axis))
+            angle_threshold = np.cos(np.radians(15))  # 15 degree tolerance
+            candidate_mask = alignments > angle_threshold
+            
+            # Remove already used points
+            available_mask = np.ones(len(points), dtype=bool)
+            if used_points:
+                available_mask[list(used_points)] = False
+            
+            candidate_indices = np.where(candidate_mask & available_mask)[0]
+            
+            if len(candidate_indices) < 100:  # minimum points needed
+                print(f"Warning: Only {len(candidate_indices)} candidate points for axis {target_axis}")
+                results[axis] = []
+                continue
+            
+            # Cluster candidate points to find plane regions
+            candidate_points = points[candidate_indices]
+            planes = self._cluster_points_into_planes(
+                candidate_points, candidate_indices, target_axis, expected_count
+            )
+            
+            results[axis] = planes
+            
+            # Mark points as used
+            for plane_info in planes:
+                used_points.update(plane_info['point_indices'])
+        
+        return results
+        
+    def project_points_onto_axis(self, points, axis):
+        axis = axis / np.linalg.norm(axis)
+        return np.dot(points, axis)
+    
+    def angle_between_vectors(self, v1, v2):
+        v1 = v1 / np.linalg.norm(v1)
+        v2 = v2 / np.linalg.norm(v2)
+        dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
+        angle = np.arccos(dot)
+        return min(angle, np.pi - angle)
+    
+    def fit_ransac_plane(self, points, distance_threshold=0.01, ransac_n=3, num_iterations=1000):
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+        try:
+            plane_model, inliers = pcd.segment_plane(distance_threshold=distance_threshold,
+                                                     ransac_n=ransac_n,
+                                                     num_iterations=num_iterations)
+            return plane_model, inliers
+        except:
+            return None, []
+    
+    def remove_close_planes(self, planes, distance_threshold=0.01, angle_threshold=5):
+        filtered = []
+        for i, (n1, d1) in enumerate(planes):
+            is_close = False
+            for j, (n2, d2) in enumerate(filtered):
+                angle = self.angle_between_vectors(n1, n2)
+                dist = abs(d1 - d2)
+                if angle < angle_threshold and dist < distance_threshold:
+                    is_close = True
+                    break
+            if not is_close:
+                filtered.append((n1, d1))
+        return filtered
+    
+    def detect_planes_along_axes(self, pcd, target_axes, expected_counts,
+                                 projection_window=0.05,
+                                 n_centers=100,
+                                 angle_tolerance_deg=10,
+                                 max_iterations=5):
+    
+        points = np.asarray(pcd.points)
+        all_keep_planes = {}
+    
+        for axis_idx, axis in enumerate(target_axes):
+            print('')
+            print('#'*60)
+            print(f'Working on axis {axis}')
+            keep_planes = []
+            projection = self.project_points_onto_axis(points, axis)
+            min_proj, max_proj = projection.min(), projection.max()
+            target_count = expected_counts.get(axis_idx, 0)
+    
+            for attempt in range(max_iterations):
+                keep_planes.clear()
+                # Sweep the projected range in windows
+                sweep_range = np.linspace(min_proj, max_proj, n_centers)
+                # sweep_range = np.arange(min_proj, max_proj, n_centers)
+                for center in sweep_range:
+                    low = center - projection_window / 2
+                    high = center + projection_window / 2
+                    indices = np.where((projection >= low) & (projection <= high))[0]
+                    
+                    # print(f'{len(indices)} indices found between {low} and {high}')
+    
+                    if len(indices) < 100:
+                        continue
+    
+                    sub_points = points[indices]
+                    model, inliers = self.fit_ransac_plane(sub_points)
+                    if model is None or len(inliers) < 100:
+                        continue
+                    
+                    # print(f'\nModel found with {len(inliers)} inliers')
+                    
+                    normal = np.array(model[:3])
+                    d = model[3]
+                    angle = self.angle_between_vectors(normal, axis)
+                    if np.degrees(angle) < angle_tolerance_deg:
+                        keep_planes.append((normal, d))
+                        print(f'\nModel is {np.degrees(angle)} away from target axis')
+                        # print(f'\tKEPT THIS PLANE MODEL')
+    
+                keep_planes = self.remove_close_planes(keep_planes)
+                if len(keep_planes) == target_count:
+                    break
+    
+            all_keep_planes[axis_idx] = keep_planes
+    
+        return all_keep_planes
+    
+    def detect_with_hierarchical_ransac(self, pcd, target_axes, expected_counts):
+        """
+        Strategy 4: Hierarchical RANSAC
+        Use coarse-to-fine approach for better efficiency
+        """
+        print("=== Strategy 4: Hierarchical RANSAC ===")
+        
+        results = {}
+        
+        # Sort axes by expected count (process easier cases first)
+        sorted_axes = sorted(expected_counts.items(), key=lambda x: x[1])
+        
+        pcd_remaining = pcd.select_by_index([], invert=True)  # clone
+        
+        for axis_str, expected_count in sorted_axes:
+            target_axis = np.array(eval(axis_str))
+            
+            print(f"\nProcessing axis {target_axis} (expecting {expected_count})")
+            print(f"Points remaining: {len(pcd_remaining.points)}")
+            
+            if len(pcd_remaining.points) < self.ransac_n:
+                results[axis_str] = []
+                continue
+            
+            # Phase 1: Coarse detection with relaxed parameters
+            coarse_planes = self._coarse_plane_detection(
+                pcd_remaining, target_axis, expected_count * 2  # detect more than needed
+            )
+            
+            # Phase 2: Fine-tune and select best planes
+            fine_planes, used_indices = self._fine_tune_planes(
+                pcd_remaining, coarse_planes, target_axis, expected_count
+            )
+            
+            results[axis_str] = fine_planes
+            
+            # Remove used points for next iteration
+            if used_indices:
+                pcd_remaining = pcd_remaining.select_by_index(used_indices, invert=True)
+        
+        return results
+    
+    def _assign_planes_to_axes(self, planes, target_axes, expected_counts):
+        """Assign detected planes to target axes based on normal alignment"""
+        plane_normals = np.array([plane[:3] / np.linalg.norm(plane[:3]) for plane in planes])
+        target_axes_norm = np.array([np.array(axis) / np.linalg.norm(axis) for axis in target_axes])
+        
+        # Calculate alignment scores (absolute dot product)
+        alignment_matrix = np.abs(np.dot(plane_normals, target_axes_norm.T))
+        
+        assignments = {}
+        used_planes = set()
+        
+        # Greedy assignment: for each axis, pick best aligned unused planes
+        for i, axis in enumerate(target_axes):
+            axis_str = str(axis)
+            expected_count = expected_counts[axis_str]
+            
+            # Get alignment scores for unused planes
+            available_planes = [j for j in range(len(planes)) if j not in used_planes]
+            if not available_planes:
+                assignments[axis_str] = []
+                continue
+            
+            # Sort by alignment score
+            scores = [(j, alignment_matrix[j, i]) for j in available_planes]
+            scores.sort(key=lambda x: x[1], reverse=True)
+            
+            # Take top N planes
+            selected = scores[:expected_count]
+            selected_indices = [idx for idx, score in selected if score > 0.8]  # minimum alignment
+            
+            assignments[axis_str] = [planes[idx] for idx in selected_indices]
+            used_planes.update(selected_indices)
+        
+        return assignments
+    
+    def _detect_planes_for_axis(self, pcd, target_axis, expected_count, distance_thresh, iterations):
+        """Detect planes for a specific axis with adaptive parameters"""
+        target_axis = np.array(target_axis) / np.linalg.norm(target_axis)
+        angle_threshold = np.cos(np.radians(10))  # 10 degree tolerance
+        
+        planes = []
+        pcd_working = pcd.select_by_index([], invert=True)
+        
+        # Try to find more planes than expected, then filter
+        max_attempts = expected_count * 3
+        
+        for _ in range(max_attempts):
+            if len(pcd_working.points) < self.ransac_n:
+                break
+            
+            plane_model, inliers = pcd_working.segment_plane(
+                distance_threshold=distance_thresh,
+                ransac_n=self.ransac_n,
+                num_iterations=iterations
+            )
+            
+            if len(inliers) < 30:  # minimum plane size
+                break
+            
+            # Check alignment with target axis
+            normal = np.array(plane_model[:3]) / np.linalg.norm(plane_model[:3])
+            alignment = np.abs(np.dot(normal, target_axis))
+            
+            if alignment > angle_threshold:
+                planes.append(plane_model)
+                pcd_working = pcd_working.select_by_index(inliers, invert=True)
+            else:
+                # Remove some inliers but not all (partial removal strategy)
+                remove_count = len(inliers) // 3
+                remove_indices = np.random.choice(inliers, remove_count, replace=False)
+                pcd_working = pcd_working.select_by_index(remove_indices, invert=True)
+        
+        # Post-process: select best planes if we have too many
+        if len(planes) > expected_count:
+            planes = self._select_best_planes(planes, target_axis, expected_count)
+        
+        return planes
+    
+    def _cluster_points_into_planes(self, points, point_indices, target_axis, expected_count):
+        """Cluster points into plane regions using spatial clustering"""
+        if len(points) < 100:
+            return []
+        
+        # Project points onto plane perpendicular to target axis
+        projection_matrix = np.eye(3) - np.outer(target_axis, target_axis)
+        projected_points = np.dot(points, projection_matrix.T)
+        
+        # Cluster in 2D projected space
+        if expected_count == 1:
+            # Single cluster
+            labels = np.zeros(len(points))
+        else:
+            # Use DBSCAN or KMeans
+            clustering = DBSCAN(eps=2.0, min_samples=50).fit(projected_points)
+            labels = clustering.labels_
+        
+        planes = []
+        for label in np.unique(labels):
+            if label == -1:  # noise in DBSCAN
+                continue
+                
+            cluster_mask = labels == label
+            cluster_points = points[cluster_mask]
+            cluster_indices = point_indices[cluster_mask]
+            
+            if len(cluster_points) < 50:
+                continue
+            
+            # Fit plane to cluster
+            plane_model = self._fit_plane_to_points(cluster_points)
+            
+            planes.append({
+                'model': plane_model,
+                'points': cluster_points,
+                'point_indices': cluster_indices
+            })
+        
+        return planes[:expected_count]  # Return only expected number
+    
+    def _coarse_plane_detection(self, pcd, target_axis, max_planes):
+        """Coarse plane detection with relaxed parameters"""
+        planes = []
+        pcd_working = pcd.select_by_index([], invert=True)
+        
+        # Relaxed parameters for coarse detection
+        coarse_distance_thresh = self.distance_threshold * 2
+        coarse_iterations = self.num_iterations // 4
+        
+        for _ in range(max_planes):
+            if len(pcd_working.points) < self.ransac_n:
+                break
+                
+            plane_model, inliers = pcd_working.segment_plane(
+                distance_threshold=coarse_distance_thresh,
+                ransac_n=self.ransac_n,
+                num_iterations=coarse_iterations
+            )
+            
+            if len(inliers) < 20:
+                break
+            
+            planes.append((plane_model, inliers))
+            pcd_working = pcd_working.select_by_index(inliers, invert=True)
+        
+        return planes
+    
+    def _fine_tune_planes(self, pcd, coarse_planes, target_axis, expected_count):
+        """Fine-tune coarse planes and select the best ones"""
+        target_axis = np.array(target_axis) / np.linalg.norm(target_axis)
+        
+        refined_planes = []
+        
+        for plane_model, inliers in coarse_planes:
+            # Check alignment
+            normal = np.array(plane_model[:3]) / np.linalg.norm(plane_model[:3])
+            alignment = np.abs(np.dot(normal, target_axis))
+            
+            if alignment > 0.8:  # Good alignment
+                # Refine with stricter parameters
+                inlier_cloud = pcd.select_by_index(inliers)
+                refined_model, refined_inliers = inlier_cloud.segment_plane(
+                    distance_threshold=self.distance_threshold,
+                    ransac_n=self.ransac_n,
+                    num_iterations=self.num_iterations
+                )
+                
+                if len(refined_inliers) > 30:
+                    refined_planes.append((refined_model, refined_inliers, alignment))
+        
+        # Sort by alignment and size, take top N
+        refined_planes.sort(key=lambda x: (x[2], len(x[1])), reverse=True)
+        
+        selected_planes = refined_planes[:expected_count]
+        all_used_indices = []
+        
+        for _, inliers, _ in selected_planes:
+            all_used_indices.extend(inliers)
+        
+        return [plane[0] for plane in selected_planes], all_used_indices
+    
+    def _select_best_planes(self, planes, target_axis, expected_count):
+        """Select best planes based on alignment and separation"""
+        if len(planes) <= expected_count:
+            return planes
+        
+        target_axis = np.array(target_axis) / np.linalg.norm(target_axis)
+        
+        # Calculate alignment scores
+        scores = []
+        for plane in planes:
+            normal = np.array(plane[:3]) / np.linalg.norm(plane[:3])
+            alignment = np.abs(np.dot(normal, target_axis))
+            scores.append(alignment)
+        
+        # Sort by alignment score
+        sorted_indices = np.argsort(scores)[::-1]
+        
+        # Select top planes ensuring they're not too close to each other
+        selected = [sorted_indices[0]]  # Always take the best
+        
+        for i in range(1, len(sorted_indices)):
+            candidate_idx = sorted_indices[i]
+            candidate_plane = planes[candidate_idx]
+            
+            # Check if this plane is sufficiently different from selected ones
+            is_different = True
+            for selected_idx in selected:
+                selected_plane = planes[selected_idx]
+                if abs(candidate_plane[3] - selected_plane[3]) < 1.0:  # too close in d
+                    is_different = False
+                    break
+            
+            if is_different:
+                selected.append(candidate_idx)
+                if len(selected) >= expected_count:
+                    break
+        
+        return [planes[i] for i in selected]
+    
+    def _fit_plane_to_points(self, points):
+        """Fit plane to point cluster using SVD"""
+        centroid = np.mean(points, axis=0)
+        centered_points = points - centroid
+        
+        # SVD to find normal
+        U, S, Vt = np.linalg.svd(centered_points)
+        normal = Vt[-1]  # Last row is the normal
+        
+        # Calculate d parameter
+        d = -np.dot(normal, centroid)
+        
+        return np.array([normal[0], normal[1], normal[2], d])
+
+
+# Usage example
+def efficient_plane_detection_main(pcd, target_axes, expected_counts_dict):
+    """
+    Main function demonstrating all strategies
+    """
+    detector = EfficientPlaneDetector()
+    
+    # Try strategies in order of efficiency
+    strategies = [
+        detector.detect_all_planes_simultaneously,
+        detector.detect_with_hierarchical_ransac,
+        detector.detect_with_adaptive_parameters,
+        detector.detect_with_region_growing
+    ]
+    
+    for i, strategy in enumerate(strategies, 1):
+        try:
+            print(f"\n{'='*50}")
+            print(f"Trying Strategy {i}")
+            print(f"{'='*50}")
+            
+            results = strategy(pcd, target_axes, expected_counts_dict)
+            
+            # Validate results
+            total_found = sum(len(planes) for planes in results.values())
+            total_expected = sum(expected_counts_dict.values())
+            
+            if total_found >= total_expected * 0.8:  # 80% success rate
+                print(f"Strategy {i} succeeded! Found {total_found}/{total_expected} planes")
+                return results
+            else:
+                print(f"Strategy {i} partially succeeded: {total_found}/{total_expected}")
+                
+        except Exception as e:
+            print(f"Strategy {i} failed: {e}")
+            continue
+    
+    raise Exception("All strategies failed to find sufficient planes")
+    
+def detect_fixture_planes_efficient(pcd, target_axes):
+    expected_counts = {
+        str([0, 0, 1]): 1,
+        str([1, 0, 0]): 4,
+        str([np.sqrt(3)/2, 0, -0.5]): 1,
+        str([-np.sqrt(3)/2, 0, -0.5]): 1
+    }
+    
+    # # Apply your existing PCA alignment
+    # pcd = apply_pca_alignment(base_pcd)  # your existing code
+    
+    # Use efficient detection
+    # results = efficient_plane_detection_main(pcd, target_axes, expected_counts)
+    
+    detector = EfficientPlaneDetector()
+    projection_window = 50.0
+    n_centers = 50
+    all_keep_planes = detector.detect_planes_along_axes(pcd,
+                                                        target_axes,
+                                                        expected_counts,
+                                                        projection_window=projection_window,
+                                                        n_centers=n_centers)
+    
+    return all_keep_planes
+
+
+
+
+# Example usage:
+# expected_counts = {
+#     str([0, 0, 1]): 1,
+#     str([1, 0, 0]): 4,
+#     str([np.sqrt(3)/2, 0, -0.5]): 1,
+#     str([-np.sqrt(3)/2, 0, -0.5]): 1
+# }
+# 
+# results = efficient_plane_detection_main(pcd, target_axes, expected_counts)
+
+
+
+
+
+
+
+
+
 
 def normalize_plane_append(plane):
     n = plane[:3]
@@ -886,23 +1650,204 @@ def define_constraints():
     return cons
 
 
+# def optimize_all_planes(keep_planes, keep_inlier_clouds):
+#     """
+#     Optimize planes with the following constraints:
+#     - keep_planes[0] orthogonal to keep_planes[1:5]
+#     - Among keep_planes[1:5], identify outer and inner pairs along X:
+#        * outer two planes parallel
+#        * inner two planes parallel
+#     - keep_planes[5] and keep_planes[6] have 60 degrees separation
+#     - Intersection line of planes 5 & 6 is parallel to the inner pair and has zero Z component
+#     """
+    
+#     # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
+#     idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(
+#         keep_planes[1:5], keep_inlier_clouds[1:5]
+#     )
+#     # Map these local indices to global indices in keep_planes
+#     x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+
+#     # Flatten all planes into parameters for optimization
+#     flat_params = np.hstack(keep_planes)
+
+#     def constraint_func(params):
+#         n_planes = len(params) // 4
+#         planes = [params[i*4:(i+1)*4] for i in range(n_planes)]
+
+#         constraints = []
+
+#         # 1) keep_planes[0] orthogonal to all planes in keep_planes[1:5]
+#         base_plane = planes[0]
+#         for idx in x_plane_indices:
+#             n_base = base_plane[:3] / np.linalg.norm(base_plane[:3])
+#             n_other = planes[idx][:3] / np.linalg.norm(planes[idx][:3])
+#             # Dot product should be zero for orthogonality
+#             constraints.append(np.dot(n_base, n_other))
+
+#         # 2) Outer pair of keep_planes[1:5] parallel
+#         l_support = planes[x_plane_indices[0]][:3] / np.linalg.norm(planes[x_plane_indices[0]][:3])
+#         r_support = planes[x_plane_indices[3]][:3] / np.linalg.norm(planes[x_plane_indices[3]][:3])
+#         constraints.append(np.dot(l_support, r_support) - 1)  # parallel means dot == ±1, use +1 here and consider orientation fix if needed
+
+#         # 3) Inner pair of keep_planes[1:5] parallel
+#         l_anvil = planes[x_plane_indices[1]][:3] / np.linalg.norm(planes[x_plane_indices[1]][:3])
+#         r_anvil = planes[x_plane_indices[2]][:3] / np.linalg.norm(planes[x_plane_indices[2]][:3])
+#         constraints.append(np.dot(l_anvil, r_anvil) - 1)
+
+#         # 4) keep_planes[5] and keep_planes[6] separated by 60 degrees
+#         n5 = planes[5][:3] / np.linalg.norm(planes[5][:3])
+#         n6 = planes[6][:3] / np.linalg.norm(planes[6][:3])
+#         cos_60 = np.cos(np.radians(60))
+#         constraints.append(np.dot(n5, n6) - cos_60)
+        
+#         # 5) Ensure sides of anvil and angled faces of anvil are 150 degrees apart
+#         cos_150 = np.cos(np.radians(150))
+#         constraints.append(np.dot(n5, l_anvil) - np.abs(cos_150))
+#         constraints.append(np.dot(n6, r_anvil) - np.abs(cos_150))
+
+#         # 6) Each plane normal must be unit length
+#         for plane in planes:
+#             constraints.append(np.linalg.norm(plane[:3]) - 1)
+            
+#         # # 7) Support planes must be separated by supports_distance
+#         # n5 = planes[5][:3]
+#         # n6 = planes[6][:3]
+#         # d5 = planes[5][3]
+#         # d6 = planes[6][3]
+        
+#         # # Compute unit normals
+#         # n5_unit = normalize(n5)
+#         # n6_unit = normalize(n6)
+        
+#         # # Mid-normal (should be parallel to both)
+#         # n_avg = normalize((n5_unit + n6_unit) / 2)
+        
+#         # # Signed separation: project difference of d terms onto normal
+#         # if d6 >= d5:
+#         #     separation = (d6 - d5) / np.dot(n_avg, n5_unit)
+#         # else:
+#         #     separation = (d5 - d6) / np.dot(n_avg, n5_unit)
+        
+#         # # Enforce positive direction by sign convention
+#         # constraints.append(separation - supports_distance)
+        
+        
+                
+#         # 8) Anvil vertical planes must be separated by 25 mm
+#         l_anvil_plane = planes[x_plane_indices[1]]
+#         r_anvil_plane = planes[x_plane_indices[2]]
+        
+#         na1 = l_anvil_plane[:3]
+#         na2 = r_anvil_plane[:3]
+#         da1 = l_anvil_plane[3]
+#         da2 = r_anvil_plane[3]
+        
+#         na1_unit = normalize(na1)
+#         na2_unit = normalize(na2)
+#         na_avg = normalize((na1_unit + na2_unit) / 2)
+        
+#         if da1 >= da2:
+#             anvil_sep = (da1 - da2) / np.dot(na_avg, na1_unit)
+#         else:
+#             anvil_sep = (da2 - da1) / np.dot(na_avg, na1_unit)
+#         constraints.append(anvil_sep - 25.0)
+
+
+#         return np.array(constraints)
+
+#     # Define objective function: sum of squared residuals of points to their respective planes
+#     def objective_func(params):
+#         n_planes = len(params) // 4
+#         planes = [params[i*4:(i+1)*4] for i in range(n_planes)]
+#         loss = 0.0
+#         for i, plane in enumerate(planes):
+#             n = plane[:3]
+#             n /= np.linalg.norm(n)
+#             d = plane[3]
+#             pts = np.asarray(keep_inlier_clouds[i].points)
+#             res = pts @ n + d
+#             loss += np.sum(res**2)
+#         return loss
+
+#     n_constraints = len(constraint_func(flat_params))
+#     cons = [{'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]} for i in range(n_constraints)]
+    
+#     print("[INFO] Optimizing fit planes")
+#     result = minimize(
+#         objective_func,
+#         flat_params,
+#         method='SLSQP',
+#         constraints=cons,
+#         options={'maxiter': 500,
+#                  'disp': True,
+#                  'ftol': 1e-10}
+#     )
+
+#     if not result.success:
+#         print("Optimization failed:", result.message)
+
+#     optimized_planes = [result.x[i*4:(i+1)*4] for i in range(len(keep_planes))]
+    
+#     # After optimization, create plane meshes for visualization
+#     optimized_plane_meshes = []
+#     for plane, cloud in zip(optimized_planes, keep_inlier_clouds):
+#         mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
+#         optimized_plane_meshes.append(mesh)
+
+#     return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
+
 def optimize_all_planes(keep_planes, keep_inlier_clouds):
     """
     Optimize planes with the following constraints:
-    - keep_planes[0] orthogonal to keep_planes[1:5]
+    - keep_planes[0] normal aligned with Z axis (preserving initial direction)
+    - keep_planes[1:5] normals aligned with X axis (preserving initial directions)
     - Among keep_planes[1:5], identify outer and inner pairs along X:
-       * outer two planes parallel
-       * inner two planes parallel
+       * outer two planes parallel (same or opposite direction based on initial)
+       * inner two planes parallel (same or opposite direction based on initial)
     - keep_planes[5] and keep_planes[6] have 60 degrees separation
     - Intersection line of planes 5 & 6 is parallel to the inner pair and has zero Z component
     """
-
+    
+    # Determine target directions for axis alignment based on initial normals
+    def get_target_direction(normal, target_axis):
+        """Determine whether normal should align with +axis or -axis"""
+        normal_unit = normal / np.linalg.norm(normal)
+        dot_pos = np.dot(normal_unit, target_axis)
+        dot_neg = np.dot(normal_unit, -target_axis)
+        return target_axis if dot_pos > dot_neg else -target_axis
+    
+    # Define target axes
+    z_axis = np.array([0, 0, 1])
+    x_axis = np.array([1, 0, 0])
+    
+    # Determine target directions for each plane
+    z_target = get_target_direction(keep_planes[0][:3], z_axis)
+    x_targets = [get_target_direction(keep_planes[i][:3], x_axis) for i in range(1, 6)]
+    
     # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
     idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(
         keep_planes[1:5], keep_inlier_clouds[1:5]
     )
     # Map these local indices to global indices in keep_planes
     x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+    
+    # Determine parallel relationship for outer and inner pairs
+    def should_be_same_direction(normal1, normal2):
+        """Check if two normals should point in same direction (dot > 0) or opposite"""
+        n1_unit = normal1 / np.linalg.norm(normal1)
+        n2_unit = normal2 / np.linalg.norm(normal2)
+        return np.dot(n1_unit, n2_unit) > 0
+    
+    # Check initial relationships
+    outer_same_dir = should_be_same_direction(
+        keep_planes[x_plane_indices[0]][:3], 
+        keep_planes[x_plane_indices[3]][:3]
+    )
+    inner_same_dir = should_be_same_direction(
+        keep_planes[x_plane_indices[1]][:3], 
+        keep_planes[x_plane_indices[2]][:3]
+    )
 
     # Flatten all planes into parameters for optimization
     flat_params = np.hstack(keep_planes)
@@ -913,61 +1858,60 @@ def optimize_all_planes(keep_planes, keep_inlier_clouds):
 
         constraints = []
 
-        # 1) keep_planes[0] orthogonal to all planes in keep_planes[1:5]
-        base_plane = planes[0]
-        for idx in x_plane_indices:
-            n_base = base_plane[:3] / np.linalg.norm(base_plane[:3])
-            n_other = planes[idx][:3] / np.linalg.norm(planes[idx][:3])
-            # Dot product should be zero for orthogonality
-            constraints.append(np.dot(n_base, n_other))
+        # 1) keep_planes[0] normal aligned with Z axis (preserving direction)
+        base_normal = planes[0][:3]
+        base_normal_unit = base_normal / np.linalg.norm(base_normal)
+        # Constrain to be exactly aligned with target Z direction
+        constraints.extend([
+            base_normal_unit[0],  # x component = 0
+            base_normal_unit[1],  # y component = 0
+            base_normal_unit[2] - z_target[2]  # z component = ±1
+        ])
 
-        # 2) Outer pair of keep_planes[1:5] parallel
-        l_support = planes[x_plane_indices[0]][:3] / np.linalg.norm(planes[x_plane_indices[0]][:3])
-        r_support = planes[x_plane_indices[3]][:3] / np.linalg.norm(planes[x_plane_indices[3]][:3])
-        constraints.append(np.dot(l_support, r_support) - 1)  # parallel means dot == ±1, use +1 here and consider orientation fix if needed
+        # 2) keep_planes[1:5] normals aligned with X axis (preserving directions)
+        for i, global_idx in enumerate(x_plane_indices):
+            normal = planes[global_idx][:3]
+            normal_unit = normal / np.linalg.norm(normal)
+            target_x = x_targets[global_idx - 1]  # -1 because x_targets is indexed from keep_planes[1]
+            constraints.extend([
+                normal_unit[1],  # y component = 0
+                normal_unit[2],  # z component = 0
+                normal_unit[0] - target_x[0]  # x component = ±1
+            ])
 
-        # 3) Inner pair of keep_planes[1:5] parallel
-        l_anvil = planes[x_plane_indices[1]][:3] / np.linalg.norm(planes[x_plane_indices[1]][:3])
-        r_anvil = planes[x_plane_indices[2]][:3] / np.linalg.norm(planes[x_plane_indices[2]][:3])
-        constraints.append(np.dot(l_anvil, r_anvil) - 1)
+        # 3) Outer pair of keep_planes[1:5] parallel
+        n_outer1 = planes[x_plane_indices[0]][:3] / np.linalg.norm(planes[x_plane_indices[0]][:3])
+        n_outer2 = planes[x_plane_indices[3]][:3] / np.linalg.norm(planes[x_plane_indices[3]][:3])
+        if outer_same_dir:
+            constraints.append(np.dot(n_outer1, n_outer2) - 1)
+        else:
+            constraints.append(np.dot(n_outer1, n_outer2) + 1)
 
-        # 4) keep_planes[5] and keep_planes[6] separated by 60 degrees
+        # 4) Inner pair of keep_planes[1:5] parallel
+        n_inner1 = planes[x_plane_indices[1]][:3] / np.linalg.norm(planes[x_plane_indices[1]][:3])
+        n_inner2 = planes[x_plane_indices[2]][:3] / np.linalg.norm(planes[x_plane_indices[2]][:3])
+        if inner_same_dir:
+            constraints.append(np.dot(n_inner1, n_inner2) - 1)
+        else:
+            constraints.append(np.dot(n_inner1, n_inner2) + 1)
+
+        # 5) keep_planes[5] and keep_planes[6] separated by 60 degrees
         n5 = planes[5][:3] / np.linalg.norm(planes[5][:3])
         n6 = planes[6][:3] / np.linalg.norm(planes[6][:3])
         cos_60 = np.cos(np.radians(60))
         constraints.append(np.dot(n5, n6) - cos_60)
         
-        # 5) Ensure sides of anvil and angled faces of anvil are 150 degrees apart
+        # 6) Ensure sides of anvil and angled faces of anvil are 150 degrees apart
         cos_150 = np.cos(np.radians(150))
+        l_anvil = planes[x_plane_indices[1]][:3] / np.linalg.norm(planes[x_plane_indices[1]][:3])
+        r_anvil = planes[x_plane_indices[2]][:3] / np.linalg.norm(planes[x_plane_indices[2]][:3])
         constraints.append(np.dot(n5, l_anvil) - np.abs(cos_150))
         constraints.append(np.dot(n6, r_anvil) - np.abs(cos_150))
 
-        # 6) Each plane normal must be unit length
+        # 7) Each plane normal must be unit length
         for plane in planes:
             constraints.append(np.linalg.norm(plane[:3]) - 1)
-            
-        # # 7) Support planes must be separated by supports_distance
-        # n5 = planes[5][:3]
-        # n6 = planes[6][:3]
-        # d5 = planes[5][3]
-        # d6 = planes[6][3]
-        
-        # # Compute unit normals
-        # n5_unit = normalize(n5)
-        # n6_unit = normalize(n6)
-        
-        # # Mid-normal (should be parallel to both)
-        # n_avg = normalize((n5_unit + n6_unit) / 2)
-        
-        # # Signed separation: project difference of d terms onto normal
-        # if d6 >= d5:
-        #     separation = (d6 - d5) / np.dot(n_avg, n5_unit)
-        # else:
-        #     separation = (d5 - d6) / np.dot(n_avg, n5_unit)
-        
-        # # Enforce positive direction by sign convention
-        # constraints.append(separation - supports_distance)
-                
+                        
         # 8) Anvil vertical planes must be separated by 25 mm
         l_anvil_plane = planes[x_plane_indices[1]]
         r_anvil_plane = planes[x_plane_indices[2]]
@@ -987,7 +1931,6 @@ def optimize_all_planes(keep_planes, keep_inlier_clouds):
             anvil_sep = (da2 - da1) / np.dot(na_avg, na1_unit)
         constraints.append(anvil_sep - 25.0)
 
-
         return np.array(constraints)
 
     # Define objective function: sum of squared residuals of points to their respective planes
@@ -1006,7 +1949,13 @@ def optimize_all_planes(keep_planes, keep_inlier_clouds):
 
     n_constraints = len(constraint_func(flat_params))
     cons = [{'type': 'eq', 'fun': lambda x, i=i: constraint_func(x)[i]} for i in range(n_constraints)]
-
+    
+    print(f"[INFO] Target Z direction: {z_target}")
+    print(f"[INFO] Target X directions: {[x_targets[i] for i in range(len(x_plane_indices))]}")
+    print(f"[INFO] Outer planes same direction: {outer_same_dir}")
+    print(f"[INFO] Inner planes same direction: {inner_same_dir}")
+    print("[INFO] Optimizing fit planes")
+    
     result = minimize(
         objective_func,
         flat_params,
@@ -1051,6 +2000,81 @@ def separation_between_parallel_planes(plane1, plane2):
     # Return the absolute separation between the planes
     return abs(dist1 - dist2)
 
+# def create_cylinder_relative_to_planes(
+#     plane1, plane2,
+#     plane1_offset,
+#     plane2_offset,
+#     diameter, height
+# ):
+#     """
+#     Create a cylinder aligned with the intersection of two orthogonal planes.
+
+#     Parameters:
+#     - plane1, plane2: 4-element numpy arrays [a, b, c, d] for ax + by + cz + d = 0
+#     - plane1_offset, plane2_offset: Scalar distances (can be positive or negative)
+#     - diameter: Cylinder diameter
+#     - height: Cylinder height
+
+#     Returns:
+#     - trimesh.Trimesh cylinder mesh
+#     """
+
+#     def flip_if_major_negative(plane):
+#         normal = plane[:3]
+#         major_idx = np.argmax(np.abs(normal))
+#         if normal[major_idx] < 0:
+#             return np.concatenate([-normal, [-plane[3]]])
+#         return plane
+
+#     # Ensure normals face positive along their major axis
+#     plane1 = flip_if_major_negative(plane1)
+#     plane2 = flip_if_major_negative(plane2)
+
+#     # Extract normals
+#     n1 = plane1[:3]
+#     n2 = plane2[:3]
+
+#     # Axis of the cylinder = intersection line of planes
+#     axis_dir = np.cross(n1, n2)
+#     axis_dir /= np.linalg.norm(axis_dir)
+
+#     # Find a point on both planes (intersection point)
+#     A = np.vstack([n1, n2, axis_dir])
+#     b = -np.array([plane1[3], plane2[3], 0])
+#     intersection_point = np.linalg.lstsq(A, b, rcond=None)[0]
+
+#     # Offset from each plane along its normal
+#     offset_vector = n1 * plane1_offset + n2 * plane2_offset
+#     base_center = intersection_point + offset_vector - axis_dir * height / 2
+
+#     # Create default cylinder aligned with +Z
+#     cyl = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
+
+#     # Rotate to align Z axis with desired axis_dir
+#     z_axis = np.array([0, 0, 1])
+#     if np.allclose(axis_dir, z_axis):
+#         R = np.eye(3)
+#     elif np.allclose(axis_dir, -z_axis):
+#         R = -np.eye(3)
+#     else:
+#         rotation_axis = np.cross(z_axis, axis_dir)
+#         rotation_axis /= np.linalg.norm(rotation_axis)
+#         angle = np.arccos(np.clip(np.dot(z_axis, axis_dir), -1.0, 1.0))
+#         R = trimesh.transformations.rotation_matrix(angle, rotation_axis)[:3, :3]
+
+#     # Compose transform
+#     T = np.eye(4)
+#     T[:3, :3] = R
+#     T[:3, 3] = base_center
+#     cyl.apply_transform(T)
+
+#     # Translate further along the cylinder's axis
+#     T2 = np.eye(4)
+#     T2[:3, 3] = axis_dir * (height / 2)
+#     cyl.apply_transform(T2)
+
+#     return cyl
+
 def create_cylinder_relative_to_planes(
     plane1, plane2,
     plane1_offset,
@@ -1059,49 +2083,86 @@ def create_cylinder_relative_to_planes(
 ):
     """
     Create a cylinder aligned with the intersection of two orthogonal planes.
-
+    The cylinder's geometric center will be positioned such that:
+    - It's offset from plane1 by plane1_offset in world coordinates
+    - It's offset from plane2 by plane2_offset in world coordinates  
+    - Its center is at Y=0 (or follows the intersection line for non-axis-aligned planes)
+    
     Parameters:
     - plane1, plane2: 4-element numpy arrays [a, b, c, d] for ax + by + cz + d = 0
-    - plane1_offset, plane2_offset: Scalar distances (can be positive or negative)
+    - plane1_offset, plane2_offset: Scalar distances in world coordinates
+      (for Z-aligned plane1: positive = more positive Z)
+      (for X-aligned plane2: positive = more positive X)
     - diameter: Cylinder diameter
     - height: Cylinder height
-
     Returns:
     - trimesh.Trimesh cylinder mesh
     """
-
-    def flip_if_major_negative(plane):
-        normal = plane[:3]
-        major_idx = np.argmax(np.abs(normal))
-        if normal[major_idx] < 0:
-            return np.concatenate([-normal, [-plane[3]]])
-        return plane
-
-    # Ensure normals face positive along their major axis
-    plane1 = flip_if_major_negative(plane1)
-    plane2 = flip_if_major_negative(plane2)
-
-    # Extract normals
-    n1 = plane1[:3]
-    n2 = plane2[:3]
-
-    # Axis of the cylinder = intersection line of planes
+    
+    # Extract and normalize normals (preserve original orientation)
+    n1 = plane1[:3] / np.linalg.norm(plane1[:3])
+    n2 = plane2[:3] / np.linalg.norm(plane2[:3])
+    
+    # Cylinder axis = intersection line of the two planes
     axis_dir = np.cross(n1, n2)
     axis_dir /= np.linalg.norm(axis_dir)
-
-    # Find a point on both planes (intersection point)
-    A = np.vstack([n1, n2, axis_dir])
-    b = -np.array([plane1[3], plane2[3], 0])
-    intersection_point = np.linalg.lstsq(A, b, rcond=None)[0]
-
-    # Offset from each plane along its normal
-    offset_vector = n1 * plane1_offset + n2 * plane2_offset
-    base_center = intersection_point + offset_vector - axis_dir * height / 2
-
+    
+    # Find a point on the intersection line of both planes
+    # We'll find the point where the intersection line crosses Y=0
+    A = np.vstack([n1, n2])
+    b = -np.array([plane1[3], plane2[3]])
+    
+    # If planes are axis-aligned, we can solve this directly
+    if np.allclose(np.abs(n1), [0, 0, 1]) and np.allclose(np.abs(n2), [1, 0, 0]):
+        # Z-aligned and X-aligned planes
+        # Intersection line is parallel to Y-axis
+        # Find intersection point at Y=0
+        z_from_plane1 = -plane1[3] / n1[2]  # z where plane1 intersects at x=0, y=0
+        x_from_plane2 = -plane2[3] / n2[0]  # x where plane2 intersects at y=0, z=0
+        intersection_at_y0 = np.array([x_from_plane2, 0, z_from_plane1])
+    else:
+        # General case: find intersection line and get point at Y=0
+        # Use least squares to find a point on both planes
+        A_extended = np.vstack([n1, n2, [0, 1, 0]])  # Add constraint y=0
+        b_extended = np.append(b, 0)
+        intersection_at_y0 = np.linalg.lstsq(A_extended, b_extended, rcond=None)[0]
+    
+    # Apply offsets in world coordinates
+    # Determine world coordinate directions based on plane orientations
+    if np.allclose(np.abs(n1), [0, 0, 1]):  # plane1 is Z-aligned
+        plane1_offset_vector = np.array([0, 0, plane1_offset])
+    elif np.allclose(np.abs(n1), [1, 0, 0]):  # plane1 is X-aligned
+        plane1_offset_vector = np.array([plane1_offset, 0, 0])
+    elif np.allclose(np.abs(n1), [0, 1, 0]):  # plane1 is Y-aligned
+        plane1_offset_vector = np.array([0, plane1_offset, 0])
+    else:
+        # For non-axis-aligned planes, offset along the normal
+        # but ensure positive offset moves away from origin
+        world_direction = n1 if np.dot(n1, n1) > 0 else -n1
+        plane1_offset_vector = world_direction * plane1_offset
+    
+    if np.allclose(np.abs(n2), [0, 0, 1]):  # plane2 is Z-aligned
+        plane2_offset_vector = np.array([0, 0, plane2_offset])
+    elif np.allclose(np.abs(n2), [1, 0, 0]):  # plane2 is X-aligned
+        plane2_offset_vector = np.array([plane2_offset, 0, 0])
+    elif np.allclose(np.abs(n2), [0, 1, 0]):  # plane2 is Y-aligned
+        plane2_offset_vector = np.array([0, plane2_offset, 0])
+    else:
+        # For non-axis-aligned planes, offset along the normal
+        world_direction = n2 if np.dot(n2, n2) > 0 else -n2
+        plane2_offset_vector = world_direction * plane2_offset
+    
+    # Calculate where we want the final cylinder center to be
+    desired_final_center = intersection_at_y0 + plane1_offset_vector + plane2_offset_vector
+    
+    # Since we'll translate by height/2 along axis_dir, we need to pre-compensate
+    # so that after the translation, the center ends up at desired_final_center
+    initial_cylinder_center = desired_final_center - axis_dir * (height / 2)
+    
     # Create default cylinder aligned with +Z
     cyl = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
-
-    # Rotate to align Z axis with desired axis_dir
+    
+    # Rotate to align Z axis with cylinder axis direction
     z_axis = np.array([0, 0, 1])
     if np.allclose(axis_dir, z_axis):
         R = np.eye(3)
@@ -1112,18 +2173,19 @@ def create_cylinder_relative_to_planes(
         rotation_axis /= np.linalg.norm(rotation_axis)
         angle = np.arccos(np.clip(np.dot(z_axis, axis_dir), -1.0, 1.0))
         R = trimesh.transformations.rotation_matrix(angle, rotation_axis)[:3, :3]
-
-    # Compose transform
+    
+    # First transform: rotation + translation to initial position
     T = np.eye(4)
     T[:3, :3] = R
-    T[:3, 3] = base_center
+    T[:3, 3] = initial_cylinder_center
     cyl.apply_transform(T)
-
-    # Translate further along the cylinder's axis
+    
+    # Second transform: translate along the cylinder's axis by height/2
+    # This will move the center to the desired final position
     T2 = np.eye(4)
     T2[:3, 3] = axis_dir * (height / 2)
     cyl.apply_transform(T2)
-
+    
     return cyl
 
 def trimesh_to_open3d(tri_mesh):
@@ -1613,17 +2675,25 @@ def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
 
 def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
-    print("Loading mesh...")
-    base_pcd = load_mesh_as_point_cloud(fixture_scan_path)
+    # print("Loading mesh...")
+    # base_pcd = load_mesh_as_point_cloud(fixture_scan_path)
     
-    target_axes = [[0, 0, 1],
-                   [1, 0, 0],
-                   [np.sqrt(3)/2, 0, -0.5],
-                   [-np.sqrt(3)/2, 0, -0.5]]
+    # target_axes = [[0, 0, 1],
+    #                [1, 0, 0],
+    #                [np.sqrt(3)/2, 0, -0.5],
+    #                [-np.sqrt(3)/2, 0, -0.5]]
+    
+    expected_planes = {
+        0: (np.array([0, 0, 1]), 1),
+        1: (np.array([1, 0, 0]), 4),
+        2: (np.array([np.sqrt(3)/2, 0, -0.5]), 1),
+        3: (np.array([-np.sqrt(3)/2, 0, -0.5]), 1)
+    }
     
     # supports_distance = 127.66
     
-    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = detect_fixture_planes(base_pcd, target_axes)
+    # keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = detect_fixture_planes(base_pcd, target_axes)
+    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = fixture_plane_fitting.create_model(fixture_scan_path, expected_planes, visualization=True)
     
     optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
     
@@ -1830,6 +2900,231 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # output_filepath = "E:/Fixture Scans/prepared_test.stl"
     merged_mesh.export(output_path)
 
+def create_model_v2(fixture_scan_path, specimen_scan_path, output_path):
+    # mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
+    print("Loading mesh...")
+    base_pcd = load_mesh_as_point_cloud(fixture_scan_path)
+    
+    # Orient base_pcd with PCA and rotate so it is in close to the right orientation (Z up, X right)
+    base_pcd, R_pca, R_90X, R_flip, centroid = prepare_scan_orientation(base_pcd)
+    
+    target_axes = [[0, 0, 1],
+                   [1, 0, 0],
+                   [np.sqrt(3)/2, 0, -0.5],
+                   [-np.sqrt(3)/2, 0, -0.5]]
+    
+    all_keep_planes = detect_fixture_planes_efficient(base_pcd, target_axes)
+    
+    # supports_distance = 127.66
+    
+    # keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = detect_fixture_planes(base_pcd, target_axes)
+    
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
+    
+    # # Verification of constraints
+    # print("")
+    # for combo in combinations(range(len(optimized_planes)), 2):
+    #     n1 = optimized_planes[combo[0]][:3]
+    #     n2 = optimized_planes[combo[1]][:3]
+    #     angle_diff = angular_change_between_normals(n1, n2)
+        
+    #     # Check if the current combo contains X-oriented planes
+    #     set_combo = set(combo)
+    #     set_x_plane_indices = set(x_plane_indices)
+        
+    #     common_elements = list(set_combo.intersection(set_x_plane_indices))
+        
+    #     labels = []
+    #     for ele in common_elements:
+    #         x_plane_pos = x_plane_indices.index(ele)
+    #         if x_plane_pos == 0:
+    #             labels.append("Left Support")
+    #         elif x_plane_pos == 1:
+    #             labels.append("Left Side Anvil")
+    #         elif x_plane_pos == 2:
+    #             labels.append("Right Side Anvil")
+    #         elif x_plane_pos == 3:
+    #             labels.append("Right Support")
+    #         else:
+    #             raise ValueError("Index out of range")
+            
+    #     if len(common_elements) == 2:
+    #         print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} ({labels[1]}) are separated by {angle_diff:.4f} degrees')
+    #     elif len(common_elements) == 1:
+    #         if combo[0] in common_elements:
+    #             print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} are separated by {angle_diff:.4f} degrees')
+    #         else:
+    #             print(f'Planes {combo[0]} and {combo[1]} ({labels[0]}) are separated by {angle_diff:.4f} degrees')                
+    #     else:
+    #         print(f'Planes {combo[0]} and {combo[1]} are separated by {angle_diff:.4f} degrees')
+        
+    #     if np.abs(np.around(angle_diff,2)) <= 0.01:
+    #         separation_dist = separation_between_parallel_planes(optimized_planes[combo[0]], optimized_planes[combo[1]])
+    #         print(f'\tPlanes {combo[0]} and {combo[1]} are separated by a distance of {separation_dist}')
+    
+    
+    # # Re-align everything so the support planes and base plane define the world orientation
+    # planeX_idx = x_plane_indices[0]
+    # planeZ_idx = 0
+    # planeX = optimized_planes[planeX_idx]
+    # planeZ = optimized_planes[planeZ_idx]
+    
+    # # Perform alignment
+    # rotated_pcd, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
+    #     aligned_pcd, optimized_planes, planeX, planeZ
+    # )
+    
+    # # Validate results
+    # success, error_X, error_Z, total_angle = validate_minimal_rotation(
+    #     optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R_planes
+    # )    
+    
+    # print(f'\nPlane adjustment R matrix:\n{R_planes}')
+    
+    # if R_flip is not None:
+    #     R_total = R_planes @ R_90X @ R_flip @ R_pca
+    # else:
+    #     R_total = R_planes @ R_90X @ R_pca
+    
+    # print(f'\nR Total:\n{R_total}')
+    
+    # # === STEP 1: Load the original mesh ===
+    # original_mesh = load_mesh(fixture_scan_path)
+    # original_vertices = np.asarray(original_mesh.vertices)
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=25)
+    
+    # # === STEP 2: Translate to origin ===
+    # original_mesh.translate(-centroid)
+    
+    # # === STEP 3: PCA alignment ===
+    # original_mesh.rotate(R_pca, center=(0, 0, 0))
+    
+    # if R_flip is not None:
+    #     original_mesh.rotate(R_flip, center=(0, 0, 0))
+    
+    # # === STEP 4: Rotate 90° about +X ===
+    # original_mesh.rotate(R_90X, center=(0, 0, 0))
+    
+    # # === STEP 5: Apply final minimal rotation matrix R ===
+    # original_mesh.rotate(R_planes, center=(0, 0, 0))
+    
+    # # === RESULT ===
+    # transformed_reference_mesh = original_mesh
+    
+    # o3d.visualization.draw_geometries([
+    #     aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+    #     transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
+    #     axis], window_name="Transformed Reference Mesh")
+
+    # # Load and align matched specimen
+    # # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    # matched_specimen_mesh = load_mesh(specimen_scan_path)
+    
+    # aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
+    
+    # #### Create mesh models of support and anvil cylinders
+    # diameter = 10
+    # height = 40
+    
+    # base_plane = rotated_planes[0]
+    # base_support_offset = 52
+    
+    # support_offset = 25.4   # 1 inch
+    
+    # anvil_plane1 = rotated_planes[5]
+    # anvil_plane2 = rotated_planes[6]
+    # anvil = create_cylinder_relative_to_planes(anvil_plane1,
+    #                                         anvil_plane2,
+    #                                         0,
+    #                                         0,
+    #                                         diameter,
+    #                                         height)
+    # anvil_mesh = trimesh_to_open3d(anvil)
+    
+    # l_support_plane = rotated_planes[x_plane_indices[0]]
+    # l_support_plane_offset = support_offset
+    # l_support = create_cylinder_relative_to_planes(
+    #                 base_plane, l_support_plane,
+    #                 base_support_offset,
+    #                 l_support_plane_offset,
+    #                 diameter, height)
+    
+    # l_support_mesh = trimesh_to_open3d(l_support)
+    
+    # r_support_plane = rotated_planes[x_plane_indices[3]]
+    # r_support_plane_offset = -support_offset
+    # r_support = create_cylinder_relative_to_planes(
+    #                 base_plane, r_support_plane,
+    #                 base_support_offset,
+    #                 r_support_plane_offset,
+    #                 diameter, height)
+    
+    # r_support_mesh = trimesh_to_open3d(r_support)
+    
+    # # Create coordinate frame
+    # axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0,0,0])
+
+    # # Visualize optimized planes and the inlier clouds used for fitting
+    # cylinder_meshes = [anvil_mesh, l_support_mesh, r_support_mesh]
+    # o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
+    
+    # anvil = ensure_normals_outward(anvil, mesh_name="anvil")
+    # l_support = ensure_normals_outward(l_support, mesh_name="left_support")
+    # r_support = ensure_normals_outward(r_support, mesh_name="right_support")
+    # flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh")
+    
+    # # Combine meshes
+    # all_meshes = [flex_mesh, anvil, l_support, r_support]
+    
+    # intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    
+    # increment = 0.01  # Adjust the movement step as needed
+    # max_iterations = 100  # Prevent infinite loops
+    
+    # if intersecting_indices:
+    #     for _ in range(max_iterations):
+    #         still_intersecting = False
+    
+    #         # Check and resolve intersection with anvil
+    #         if all_meshes.index(anvil) in intersecting_indices:
+    #             # Move anvil up in Z
+    #             anvil.apply_translation([0, 0, increment])
+    #             print(f"Applying {increment} adjustment to Z position of anvil")
+    #             # Recheck
+    #             updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    #             if all_meshes.index(anvil) in updated:
+    #                 still_intersecting = True
+    
+    #         # Check and resolve intersection with supports
+    #         l_idx = all_meshes.index(l_support)
+    #         r_idx = all_meshes.index(r_support)
+    #         if l_idx in intersecting_indices or r_idx in intersecting_indices:
+    #             # Move both supports down in Z
+    #             l_support.apply_translation([0, 0, -increment])
+    #             r_support.apply_translation([0, 0, -increment])
+    #             print(f"Applying -{increment} adjustment to Z position of supports")
+    #             # Recheck
+    #             updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    #             if l_idx in updated or r_idx in updated:
+    #                 still_intersecting = True
+    
+    #         if not still_intersecting:
+    #             break
+    #     else:
+    #         print("Warning: Maximum adjustment iterations reached, intersection may still exist.")
+    
+    # # Adjust for good measure
+    # n_increments = 2
+    # anvil.apply_translation([0, 0, n_increments*increment])
+    # l_support.apply_translation([0, 0, -n_increments*increment])
+    # r_support.apply_translation([0, 0, -n_increments*increment])
+    
+    # merged_mesh = trimesh.util.concatenate(all_meshes)
+    
+    # # output_filepath = "E:/Fixture Scans/prepared_test.stl"
+    # merged_mesh.export(output_path)
+    return all_keep_planes
+
 def create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_folder):
     df_test_data = pd.read_excel(test_data_filepath)
     os.makedirs(prepared_meshes_folder, exist_ok=True)
@@ -1870,11 +3165,17 @@ if __name__ == "__main__":
     # create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_folder)
     
     
-    fixture_scan_path = "E:/Fixture Scans/X2_1_Fixture.stl"
-    specimen_scan_path = "E:/Fixture Scans/X2_positive_quad.stl"
-    output_path = "E:/Fixture Scans/X2_Test1.stl"
+    # fixture_scan_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
+    # fixture_scan_path = "E:/Fixture Scans/X2_1_Fixture.stl"
+    fixture_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures/X4_Test2_raw.stl"
+    # specimen_scan_path = "E:/Fixture Scans/specimen.stl"
+    # specimen_scan_path = "E:/Fixture Scans/X2.stl"
+    specimen_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens/X4_raw.stl"
+    # output_path = "E:/Fixture Scans/X2_Test1.stl"
+    output_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes/X4_Test2.stl"
     
     create_model(fixture_scan_path, specimen_scan_path, output_path)
+    # all_keep_planes = create_model_v2(fixture_scan_path, specimen_scan_path, output_path)
     
     
     
