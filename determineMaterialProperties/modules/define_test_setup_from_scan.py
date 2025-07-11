@@ -1,6 +1,6 @@
 import open3d as o3d
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 from scipy.spatial.transform import Rotation
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import find_peaks
@@ -15,6 +15,10 @@ from scipy.spatial import cKDTree
 import pandas as pd
 import os
 import fixture_plane_fitting
+import pyswarms as ps
+from pyswarms.utils.functions import single_obj as fx
+import pygad
+from tqdm import tqdm
 
 def load_mesh_as_point_cloud(mesh_path):
     mesh = o3d.io.read_triangle_mesh(mesh_path)
@@ -1537,17 +1541,48 @@ def angular_change_between_normals(n_orig, n_opt):
     angle_deg = np.degrees(angle_rad)
     return angle_deg
 
-def identify_planes_along_x(planes, clouds):
+# def identify_planes_along_x(planes, clouds):
+#     """
+#     planes: list of plane coefficients
+#     clouds: list of corresponding point clouds
+    
+#     Returns indices of planes in order from min X to max X.
+#     So returns 4 indices: outer_min, inner_min, inner_max, outer_max
+#     """
+#     # Compute centroid X for each cloud
+#     centroids = [np.mean(np.asarray(c.points), axis=0) for c in clouds]
+#     x_coords = [c[0] for c in centroids]
+    
+#     # Sort indices by X coordinate
+#     sorted_indices = sorted(range(len(x_coords)), key=lambda i: x_coords[i])
+    
+#     for idx in sorted_indices:
+#         print(f'\nX Plane Fit Coordinate: {x_coords[idx]}')    
+#         print(f'Plane Definition: {planes[idx]}')
+    
+#     # Return all four sorted indices
+#     return tuple(sorted_indices)  # will be 4 indices
+
+def identify_planes_along_x(planes):
     """
     planes: list of plane coefficients
-    clouds: list of corresponding point clouds
     
     Returns indices of planes in order from min X to max X.
     So returns 4 indices: outer_min, inner_min, inner_max, outer_max
     """
-    # Compute centroid X for each cloud
-    centroids = [np.mean(np.asarray(c.points), axis=0) for c in clouds]
-    x_coords = [c[0] for c in centroids]
+    
+    def project_origin_to_plane(plane):
+        normal = plane[0:3]
+        normal_length = np.linalg.norm(normal)
+        distance = plane[3] / normal_length
+        unit_normal = normal / normal_length
+        projected_point = -distance * unit_normal
+        return projected_point, -distance
+    
+    x_coords = []
+    for plane in planes:
+        projected_point, x_coord = project_origin_to_plane(plane)
+        x_coords.append(x_coord)
     
     # Sort indices by X coordinate
     sorted_indices = sorted(range(len(x_coords)), key=lambda i: x_coords[i])
@@ -1565,6 +1600,8 @@ def identify_planes_along_x(planes, clouds):
 # OPTIMIZE FOR ALL CONSTRAINTS
 
 def normalize(v):
+    if np.linalg.norm(v) == 0:
+        return v
     return v / np.linalg.norm(v)
 
 
@@ -1826,9 +1863,10 @@ def optimize_all_planes(keep_planes, keep_inlier_clouds):
     x_targets = [get_target_direction(keep_planes[i][:3], x_axis) for i in range(1, 6)]
     
     # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
-    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(
-        keep_planes[1:5], keep_inlier_clouds[1:5]
-    )
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(keep_planes[1:5])
+    # idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(
+    #     keep_planes[1:5], keep_inlier_clouds[1:5]
+    # )
     # Map these local indices to global indices in keep_planes
     x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
     
@@ -1980,6 +2018,1046 @@ def optimize_all_planes(keep_planes, keep_inlier_clouds):
     return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
 
 
+def optimize_all_planes_genetic_v2(keep_planes, keep_inlier_clouds):
+    ### Prep keep_planes so all similar planes have their normals facing in the
+    ### axis positive direction
+    # Define target axes
+    z_axis = [0, 0, 1]
+    x_axis = [1, 0, 0]
+    
+    # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(keep_planes[1:5])
+    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+    
+    # Determine bounds on individual genes based on keep_planes
+    base_plane = keep_planes[0]
+    outer_plane1 = keep_planes[x_plane_indices[0]]
+    outer_plane2 = keep_planes[x_plane_indices[3]]
+    inner_plane1 = keep_planes[x_plane_indices[1]]
+    inner_plane2 = keep_planes[x_plane_indices[2]]
+    anvil_plane1 = keep_planes[5]
+    anvil_plane2 = keep_planes[6]
+    
+    planes = [copy.deepcopy(base_plane),
+              copy.deepcopy(outer_plane1),
+              copy.deepcopy(outer_plane2),
+              copy.deepcopy(inner_plane1),
+              copy.deepcopy(inner_plane2),
+              copy.deepcopy(anvil_plane1),
+              copy.deepcopy(anvil_plane2)]
+    
+    def flip_plane_to_face_positive_axis(plane, target_axis=[1.0, 0.0, 0.0]):
+        normal = plane[:3]
+        target_axis = np.asarray(target_axis)
+        if np.dot(normal, target_axis) < 0:
+            # Flip the normal and d
+            return np.hstack([-normal, -plane[3]])
+        else:
+            return plane
+    
+    # Redefine planes so they are aligned roughly with positive axis definitions
+    base_plane = flip_plane_to_face_positive_axis(base_plane, z_axis)
+    outer_plane1 = flip_plane_to_face_positive_axis(outer_plane1, x_axis)
+    outer_plane2 = flip_plane_to_face_positive_axis(outer_plane2, x_axis)
+    inner_plane1 = flip_plane_to_face_positive_axis(inner_plane1, x_axis)
+    inner_plane2 = flip_plane_to_face_positive_axis(inner_plane2, x_axis)
+    anvil_plane1 = flip_plane_to_face_positive_axis(anvil_plane1, x_axis)
+    anvil_plane2 = flip_plane_to_face_positive_axis(anvil_plane2, x_axis)
+    
+    flipped_planes = [base_plane,
+              outer_plane1,
+              outer_plane2,
+              inner_plane1,
+              inner_plane2,
+              anvil_plane1,
+              anvil_plane2]
+    
+    for i in range(len(planes)):
+        if planes[i] != flipped_planes[i]:
+            print(f'Flipped plane {i}')
+        else:
+            print(f'Plane {i} was left as-is')
+    
+    
+    ### Determine the bounds on the optimization
+    def plane_to_spherical(plane):
+        """
+        Convert plane [a, b, c, d] to spherical coordinates [theta, phi, distance].
+        
+        Args:
+            plane: [a, b, c, d] where ax + by + cz + d = 0
+        
+        Returns:
+            [theta, phi, distance] where:
+            - theta: azimuthal angle (0 to 2π) around z-axis
+            - phi: polar angle (0 to π) from positive z-axis
+            - distance: absolute distance from origin to plane
+        """
+        a, b, c, d = plane
+        
+        # Normalize the normal vector
+        normal = np.array([a, b, c])
+        normal_magnitude = np.linalg.norm(normal)
+        
+        if normal_magnitude < 1e-12:
+            raise ValueError("Invalid plane: normal vector has zero magnitude")
+        
+        # Ensure normal points away from origin (positive distance)
+        if d > 0:
+            normal = -normal
+            d = -d
+        
+        unit_normal = normal / normal_magnitude
+        
+        # Convert to spherical coordinates
+        x, y, z = unit_normal
+        
+        # Calculate spherical coordinates
+        # theta: azimuthal angle (atan2(y, x))
+        theta = np.arctan2(y, x)
+        if theta < 0:
+            theta += 2 * np.pi  # Ensure theta is in [0, 2π]
+        
+        # phi: polar angle (arccos(z))
+        phi = np.arccos(np.clip(z, -1, 1))
+        
+        # Distance from origin to plane
+        distance = abs(d) / normal_magnitude
+        
+        return np.array([theta, phi, distance])
+    
+    def spherical_to_plane(spherical_coords):
+        """
+        Convert spherical coordinates [theta, phi, distance] to plane [a, b, c, d].
+        
+        Args:
+            spherical_coords: [theta, phi, distance] where:
+            - theta: azimuthal angle (0 to 2π) around z-axis
+            - phi: polar angle (0 to π) from positive z-axis  
+            - distance: absolute distance from origin to plane
+        
+        Returns:
+            [a, b, c, d] where ax + by + cz + d = 0
+        """
+        theta, phi, distance = spherical_coords
+        
+        # Convert spherical to Cartesian (unit normal)
+        x = np.sin(phi) * np.cos(theta)
+        y = np.sin(phi) * np.sin(theta)
+        z = np.cos(phi)
+        
+        # Create plane equation: ax + by + cz + d = 0
+        # where [a, b, c] is the unit normal and d = -distance
+        a, b, c = x, y, z
+        d = -distance  # Negative because we want normal pointing away from origin
+        
+        return np.array([a, b, c, d])
+    
+    def compute_spherical_bounds(theta_center, phi_center, theta_tol, phi_tol, distance_center, distance_tol):
+        """
+        Compute bounds for spherical coordinates with angular and distance tolerances.
+        
+        Args:
+            theta_center: Central azimuthal angle (radians)
+            phi_center: Central polar angle (radians)
+            theta_tol: Angular tolerance in theta direction (radians)
+            phi_tol: Angular tolerance in phi direction (radians)
+            distance_center: Central distance
+            distance_tol: Distance tolerance
+        
+        Returns:
+            Dictionary with bounds for each parameter
+        """
+        # Theta bounds (with wraparound handling)
+        theta_min = theta_center - theta_tol
+        theta_max = theta_center + theta_tol
+        
+        # Handle wraparound at 0/2π
+        if theta_min < 0:
+            theta_min += 2 * np.pi
+        if theta_max > 2 * np.pi:
+            theta_max -= 2 * np.pi
+        
+        # Phi bounds (clamped to [0, π])
+        phi_min = max(0, phi_center - phi_tol)
+        phi_max = min(np.pi, phi_center + phi_tol)
+        
+        # Distance bounds (must be positive)
+        distance_min = max(0, distance_center - distance_tol)
+        distance_max = distance_center + distance_tol
+        
+        bounds = {
+            'theta': (theta_min, theta_max),
+            'phi': (phi_min, phi_max),
+            'distance': (distance_min, distance_max),
+            'wraparound_theta': theta_min > theta_max  # Flag for wraparound case
+        }
+        
+        return bounds
+    
+    def compute_angular_bounds_from_cone(theta_center, phi_center, max_angular_deviation):
+        """
+        Compute spherical bounds that approximate a cone of allowed normals.
+        
+        Args:
+            theta_center: Central azimuthal angle (radians)
+            phi_center: Central polar angle (radians)
+            max_angular_deviation: Maximum angular deviation from center (radians)
+        
+        Returns:
+            Dictionary with bounds that approximate the cone
+        """
+        # For small angles, approximate the cone with rectangular bounds
+        # This is more accurate than using the same tolerance for both theta and phi
+        
+        # Phi tolerance is straightforward
+        phi_tol = max_angular_deviation
+        
+        # Theta tolerance depends on phi (gets larger near poles)
+        if abs(np.sin(phi_center)) < 1e-10:
+            # Near poles, theta is essentially unconstrained
+            theta_tol = np.pi
+        else:
+            # Away from poles, theta tolerance is scaled by sin(phi)
+            theta_tol = max_angular_deviation / abs(np.sin(phi_center))
+            theta_tol = min(theta_tol, np.pi)  # Clamp to reasonable value
+        
+        bounds = {
+            'theta': (theta_center - theta_tol, theta_center + theta_tol),
+            'phi': (max(0, phi_center - phi_tol), min(np.pi, phi_center + phi_tol)),
+            'angular_deviation': max_angular_deviation
+        }
+        
+        return bounds
+    
+    def validate_angular_constraint(spherical_coords, spherical_center, max_angular_deviation):
+        """
+        Check if a spherical coordinate point satisfies the angular constraint.
+        
+        Args:
+            spherical_coords: [theta, phi, distance] to check
+            spherical_center: [theta_center, phi_center, distance_center] reference
+            max_angular_deviation: Maximum allowed angular deviation (radians)
+        
+        Returns:
+            (is_valid, actual_deviation)
+        """
+        # Convert both to unit normals
+        normal1 = spherical_to_cartesian_unit(spherical_coords[0], spherical_coords[1])
+        normal2 = spherical_to_cartesian_unit(spherical_center[0], spherical_center[1])
+        
+        # Calculate actual angular deviation
+        cos_angle = np.clip(np.dot(normal1, normal2), -1, 1)
+        actual_deviation = np.arccos(cos_angle)
+        
+        is_valid = actual_deviation <= max_angular_deviation
+        
+        return is_valid, actual_deviation
+    
+    def spherical_to_cartesian_unit(theta, phi):
+        """Convert spherical coordinates to unit Cartesian vector"""
+        x = np.sin(phi) * np.cos(theta)
+        y = np.sin(phi) * np.sin(theta)
+        z = np.cos(phi)
+        return np.array([x, y, z])
+    
+    base_plane_sphere = plane_to_spherical(base_plane)
+    outer_plane1_sphere = plane_to_spherical(outer_plane1)
+    outer_plane2_sphere = plane_to_spherical(outer_plane2)
+    inner_plane1_sphere = plane_to_spherical(inner_plane1)
+    inner_plane2_sphere = plane_to_spherical(inner_plane2)
+    anvil_plane1_sphere = plane_to_spherical(anvil_plane1)
+    anvil_plane2_sphere = plane_to_spherical(anvil_plane2)
+    
+    d_tol = 10.0
+    angle_tol = np.radians(5.0)
+    
+    base_plane_bounds = compute_angular_bounds_from_cone(base_plane_sphere[0], base_plane_sphere[1], angle_tol)
+    outer_plane1_bounds = compute_angular_bounds_from_cone(outer_plane1_sphere[0], outer_plane1_sphere[1], angle_tol)
+    outer_plane2_bounds = compute_angular_bounds_from_cone(outer_plane2_sphere[0], outer_plane2_sphere[1], angle_tol)
+    inner_plane1_bounds = compute_angular_bounds_from_cone(inner_plane1_sphere[0], inner_plane1_sphere[1], angle_tol)
+    inner_plane2_bounds = compute_angular_bounds_from_cone(inner_plane2_sphere[0], inner_plane2_sphere[1], angle_tol)
+    anvil_plane1_bounds = compute_angular_bounds_from_cone(anvil_plane1_sphere[0], anvil_plane1_sphere[1], angle_tol)
+    anvil_plane2_bounds = compute_angular_bounds_from_cone(anvil_plane2_sphere[0], anvil_plane2_sphere[1], angle_tol)
+    
+    
+    # base_plane_nmin, base_plane_nmax = compute_normal_component_bounds(base_plane[:3], angle_tol)
+    # outer_plane1_nmin, outer_plane1_nmax = compute_normal_component_bounds(outer_plane1[:3], angle_tol)
+    # outer_plane2_nmin, outer_plane2_nmax = compute_normal_component_bounds(outer_plane2[:3], angle_tol)
+    # inner_plane1_nmin, inner_plane1_nmax = compute_normal_component_bounds(inner_plane1[:3], angle_tol)
+    # inner_plane2_nmin, inner_plane2_nmax = compute_normal_component_bounds(inner_plane2[:3], angle_tol)
+    # anvil_plane1_nmin, anvil_plane1_nmax = compute_normal_component_bounds(anvil_plane1[:3], angle_tol)
+    # anvil_plane2_nmin, anvil_plane2_nmax = compute_normal_component_bounds(anvil_plane2[:3], angle_tol)
+    
+    base_plane_dmin = base_plane_sphere[2] - d_tol
+    base_plane_dmax = base_plane_sphere[2] + d_tol
+    outer_plane1_dmin = outer_plane1_sphere[2] - d_tol
+    outer_plane1_dmax = outer_plane1_sphere[2] + d_tol
+    outer_plane2_dmin = outer_plane2_sphere[2] - d_tol
+    outer_plane2_dmax = outer_plane2_sphere[2] + d_tol
+    inner_plane1_dmin = inner_plane1_sphere[2] - d_tol
+    inner_plane1_dmax = inner_plane1_sphere[2] + d_tol
+    inner_plane2_dmin = inner_plane2_sphere[2] - d_tol
+    inner_plane2_dmax = inner_plane2_sphere[2] + d_tol
+    anvil_plane1_dmin = anvil_plane1_sphere[2] - d_tol
+    anvil_plane1_dmax = anvil_plane1_sphere[2] + d_tol
+    anvil_plane2_dmin = anvil_plane2_sphere[2] - d_tol
+    anvil_plane2_dmax = anvil_plane2_sphere[2] + d_tol
+    
+    
+    ### Objective
+        # Build planes from params
+        # Calculate fitting error
+    params = [base_plane_sphere[0],
+              base_plane_sphere[1],
+              base_plane_sphere[2],
+              outer_plane1_sphere[2],
+              outer_plane2_sphere[2],
+              inner_plane1_sphere[2],
+              anvil_plane1_sphere[2],
+              anvil_plane2_sphere[2]]
+    
+    gene_space = [{'low': base_plane_bounds['theta'][0], 'high': base_plane_bounds['theta'][1]},
+                  {'low': base_plane_bounds['phi'][0], 'high': base_plane_bounds['phi'][1]},
+                  {'low': base_plane_dmin, 'high': base_plane_dmax},
+                  {'low': outer_plane1_dmin, 'high': outer_plane1_dmax},
+                  {'low': outer_plane2_dmin, 'high': outer_plane2_dmax},
+                  {'low': inner_plane1_dmin, 'high': inner_plane1_dmax},
+                  {'low': anvil_plane1_dmin, 'high': anvil_plane1_dmax},
+                  {'low': anvil_plane2_dmin, 'high': anvil_plane2_dmax},
+                  ]
+    
+    def create_planes_from_params(params, verify=False):
+        """
+        Create plane definitions from parameter values.
+        
+        Each plane is represented as [a, b, c, d] where ax + by + cz + d = 0
+        and (a, b, c) is the unit normal vector.
+        
+        Args:
+            params: List of 9 float values as defined in the problem
+            
+        Returns:
+            Dictionary containing all plane definitions
+        """
+        
+        # Extract base plane from first 3 parameters
+        base_plane = np.array(params[:3])
+        base_plane_d = base_plane[2]
+        
+        
+        # Extract d-values (distances) from remaining parameters
+        outer_plane1_d = params[3]
+        outer_plane2_d = params[4]
+        inner_plane1_d = params[5]
+        anvil_plane1_d = params[6]
+        anvil_plane2_d = params[7]
+        
+        
+        
+        # Get base plane normal (already normalized since it's a plane equation)
+        base_normal = spherical_to_cartesian_unit(base_plane[0], base_plane[1])
+        base_plane = np.append(base_normal, np.array([base_plane_d]))
+        
+        # Helper function to find a vector orthogonal to base_normal
+        def find_orthogonal_vector(normal):
+            """Find a unit vector orthogonal to the given normal"""
+            # Choose a vector that's not parallel to normal
+            if abs(normal[0]) < 0.9:
+                temp = np.array([1.0, 0.0, 0.0])
+            else:
+                temp = np.array([0.0, 1.0, 0.0])
+            
+            # Use cross product to get orthogonal vector
+            orthogonal = np.cross(normal, temp)
+            return orthogonal / np.linalg.norm(orthogonal)
+        
+        # Helper function to create another orthogonal vector
+        def find_second_orthogonal_vector(normal, first_orthogonal):
+            """Find a second unit vector orthogonal to both normal and first_orthogonal"""
+            second_orthogonal = np.cross(normal, first_orthogonal)
+            return second_orthogonal / np.linalg.norm(second_orthogonal)
+        
+        # Create two orthogonal vectors in the plane perpendicular to base_normal
+        orth1 = find_orthogonal_vector(base_normal)
+        orth2 = find_second_orthogonal_vector(base_normal, orth1)
+        
+        # Create outer planes (parallel to each other, orthogonal to base)
+        outer_normal = orth1  # Use first orthogonal vector
+        outer_plane1 = np.array([outer_normal[0], outer_normal[1], outer_normal[2], outer_plane1_d])
+        outer_plane2 = np.array([outer_normal[0], outer_normal[1], outer_normal[2], outer_plane2_d])
+        
+        # Create inner planes (parallel to each other, orthogonal to base)
+        inner_normal = orth2  # Use second orthogonal vector
+        inner_plane1 = np.array([inner_normal[0], inner_normal[1], inner_normal[2], inner_plane1_d])
+        
+        # Calculate inner_plane2_d to ensure 25.0 separation
+        # Distance between parallel planes ax + by + cz + d1 = 0 and ax + by + cz + d2 = 0
+        # is |d2 - d1| / sqrt(a² + b² + c²). Since normal is unit vector, denominator is 1.
+        inner_plane2_d = inner_plane1_d + 25.0  # Add 25.0 to create separation
+        inner_plane2 = np.array([inner_normal[0], inner_normal[1], inner_normal[2], inner_plane2_d])
+        
+        # Create anvil planes with 60-degree angles
+        def create_rotated_normal(reference_normal, angle_degrees):
+            """Create a normal vector rotated by specified angle from reference"""
+            # Create rotation axis (perpendicular to reference normal)
+            if abs(reference_normal[0]) < 0.9:
+                temp_vec = np.array([1.0, 0.0, 0.0])
+            else:
+                temp_vec = np.array([0.0, 1.0, 0.0])
+            
+            rotation_axis = np.cross(reference_normal, temp_vec)
+            rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+            
+            # Create rotation matrix manually if scipy not available
+            try:
+                from scipy.spatial.transform import Rotation
+                HAS_SCIPY = True
+            except ImportError:
+                HAS_SCIPY = False
+                print("Warning: scipy not available, using manual rotation calculations")
+            
+            if HAS_SCIPY:
+                rotation = Rotation.from_rotvec(np.radians(angle_degrees) * rotation_axis)
+                rotated_normal = rotation.apply(reference_normal)
+            else:
+                # Manual rotation using Rodrigues' rotation formula
+                angle_rad = np.radians(angle_degrees)
+                cos_angle = np.cos(angle_rad)
+                sin_angle = np.sin(angle_rad)
+                
+                # Rodrigues' rotation formula: v_rot = v*cos(θ) + (k×v)*sin(θ) + k*(k·v)*(1-cos(θ))
+                k = rotation_axis
+                v = reference_normal
+                k_cross_v = np.cross(k, v)
+                k_dot_v = np.dot(k, v)
+                
+                rotated_normal = (v * cos_angle + 
+                                k_cross_v * sin_angle + 
+                                k * k_dot_v * (1 - cos_angle))
+            
+            return rotated_normal / np.linalg.norm(rotated_normal)
+        
+        # Create anvil_plane1 (60 degrees from base_plane normal)
+        anvil1_normal = create_rotated_normal(base_normal, 60.0)
+        anvil_plane1 = np.array([anvil1_normal[0], anvil1_normal[1], anvil1_normal[2], anvil_plane1_d])
+        
+        # Create anvil_plane2 (60 degrees from anvil_plane1 normal)
+        anvil2_normal = create_rotated_normal(anvil1_normal, 60.0)
+        anvil_plane2 = np.array([anvil2_normal[0], anvil2_normal[1], anvil2_normal[2], anvil_plane2_d])
+        
+        # Debug: Print intermediate values
+        # print("Debug Info:")
+        # print(f"Base plane: {base_plane}")
+        # print(f"Base normal: {base_normal}")
+        # print(f"Orth1: {orth1}")
+        # print(f"Orth2: {orth2}")
+        # print(f"Anvil1 normal: {anvil1_normal}")
+        # print(f"Anvil2 normal: {anvil2_normal}")
+        
+        # Verify constraints
+        def verify_orthogonality(plane1, plane2):
+            """Check if two planes are orthogonal (dot product of normals = 0)"""
+            dot_product = np.dot(plane1[:3], plane2[:3])
+            return abs(dot_product) < 1e-10
+        
+        def verify_parallelism(plane1, plane2):
+            """Check if two planes are parallel (normals are identical)"""
+            return np.allclose(plane1[:3], plane2[:3], atol=1e-10)
+        
+        def verify_angle(plane1, plane2, expected_angle_degrees):
+            """Check if angle between plane normals matches expected value"""
+            cos_angle = np.dot(plane1[:3], plane2[:3])
+            angle_degrees = np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
+            return abs(angle_degrees - expected_angle_degrees) < 1e-6
+        
+        def verify_separation(plane1, plane2, expected_distance):
+            """Check separation between parallel planes"""
+            distance = abs(plane2[3] - plane1[3])  # Since normals are unit vectors
+            return abs(distance - expected_distance) < 1e-10
+        
+        # Perform verification
+        if verify:
+            print("Verification Results:")
+            print(f"Outer planes orthogonal to base: {verify_orthogonality(base_plane, outer_plane1)}")
+            print(f"Inner planes orthogonal to base: {verify_orthogonality(base_plane, inner_plane1)}")
+            print(f"Outer planes parallel: {verify_parallelism(outer_plane1, outer_plane2)}")
+            print(f"Inner planes parallel: {verify_parallelism(inner_plane1, inner_plane2)}")
+            print(f"Anvil1 60° from base: {verify_angle(base_plane, anvil_plane1, 60.0)}")
+            print(f"Anvil2 60° from anvil1: {verify_angle(anvil_plane1, anvil_plane2, 60.0)}")
+            print(f"Inner planes separated by 25.0: {verify_separation(inner_plane1, inner_plane2, 25.0)}")
+        
+        created_planes = [base_plane,
+                        outer_plane1,
+                        outer_plane2,
+                        inner_plane1,
+                        inner_plane2,
+                        anvil_plane1,
+                        anvil_plane2]
+        
+        return created_planes
+        
+    
+    
+    def objective(ga_instance, solution, solution_idx):
+        planes = create_planes_from_params(solution, verify=False)
+        
+        # n_planes = len(planes)
+        loss = 0.0
+        for i, plane in enumerate(planes):
+            n = plane[:3]
+            n /= np.linalg.norm(n)
+            d = plane[3]
+            pts = np.asarray(keep_inlier_clouds[i].points)
+            res = pts @ n + d
+            loss += np.sum(res**2)
+        return 1 / loss
+        
+    # def on_generation(ga_instance):
+    #     # This function is called after each generation.
+    #     # You can print out relevant information here.
+    #     print(f"\nGeneration = {ga_instance.generations_completed}")
+    #     # print(f"Best solution = {ga_instance.best_solution()[0]}")
+    #     print(f"Fitness of the best solution = {ga_instance.best_solution()[1]}")
+    #     # print(f"Best solution index = {ga_instance.best_solution()[2]}")
+    
+    
+    ### Perform optimization (option to show progress and results)
+    n_genes = len(params)
+    initial_population = []
+    for _ in range(100):
+        jittered = copy.deepcopy(params)
+        jittered += np.random.normal(0, 0.1, size=len(jittered))
+        initial_population.append(jittered)
+    
+    num_generations = 500
+    with tqdm(total=num_generations) as pbar:
+        ga_instance = pygad.GA(
+            num_generations=num_generations,
+            num_parents_mating=5,
+            fitness_func=objective,
+            sol_per_pop=len(initial_population),
+            num_genes=n_genes,
+            initial_population=initial_population,
+            gene_space=gene_space,
+            mutation_num_genes=3,
+            mutation_type="random",
+            mutation_by_replacement=True,
+            crossover_type="single_point",
+            parent_selection_type="tournament",
+            on_generation=lambda _: pbar.update(1),
+            # tqdm=True
+        )
+    
+        print("[INFO] Running Genetic Algorithm...")
+        ga_instance.run()
+    
+    # Plot the fitness progression
+    ga_instance.plot_fitness(color='b')
+    
+    solution, solution_fitness, _ = ga_instance.best_solution()
+    print(f"\n[INFO] Optimization complete. Final fitness: {solution_fitness}")
+
+    optimized_planes = create_planes_from_params(solution)
+
+    optimized_plane_meshes = []
+    for plane, cloud in zip(optimized_planes, keep_inlier_clouds):
+        mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
+        optimized_plane_meshes.append(mesh)
+
+    return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
+    
+    
+    
+    
+    
+    
+    
+    
+
+
+
+def optimize_all_planes_genetic(keep_planes, keep_inlier_clouds):
+
+    def normalize(v):
+        return v / np.linalg.norm(v)
+
+    def get_target_direction(normal, target_axis):
+        normal_unit = normalize(normal)
+        return target_axis if np.dot(normal_unit, target_axis) > np.dot(normal_unit, -target_axis) else -target_axis
+
+    z_axis = np.array([0, 0, 1])
+    x_axis = np.array([1, 0, 0])
+    z_target = get_target_direction(keep_planes[0][:3], z_axis)
+    x_targets = [get_target_direction(keep_planes[i][:3], x_axis) for i in range(1, 6)]
+
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(keep_planes[1:5])
+    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+
+    def should_be_same_direction(normal1, normal2):
+        return np.dot(normalize(normal1), normalize(normal2)) > 0
+
+    outer_same_dir = should_be_same_direction(keep_planes[x_plane_indices[0]][:3],
+                                               keep_planes[x_plane_indices[3]][:3])
+    inner_same_dir = should_be_same_direction(keep_planes[x_plane_indices[1]][:3],
+                                               keep_planes[x_plane_indices[2]][:3])
+
+    flat_params = np.hstack(keep_planes)
+    n_planes = len(flat_params) // 4
+    n_genes = len(flat_params)
+
+    def compute_anvil_separation(p1, p2):
+        na1, da1 = normalize(p1[:3]), p1[3]
+        na2, da2 = normalize(p2[:3]), p2[3]
+        na_avg = normalize((na1 + na2) / 2)
+        sep = np.abs((da1 - da2) / np.dot(na_avg, na1))
+        return sep
+
+    def objective_func(ga_instance, solution, solution_idx):
+        planes = [solution[i * 4:(i + 1) * 4] for i in range(n_planes)]
+        loss = 0.0
+
+        for i, plane in enumerate(planes):
+            n = normalize(plane[:3])
+            d = plane[3]
+            pts = np.asarray(keep_inlier_clouds[i].points)
+            res = pts @ n + d
+            loss += np.sum(res ** 2)
+
+        penalty = 0.0
+
+        # 1) Plane[0] normal = ±Z
+        n0 = normalize(planes[0][:3])
+        penalty += 1000 * (np.abs(n0[0]) + np.abs(n0[1]) + np.abs(n0[2] - z_target[2]))
+
+        # 2) Planes[1:5] = ±X
+        for i, idx in enumerate(x_plane_indices):
+            ni = normalize(planes[idx][:3])
+            penalty += 1000 * (np.abs(ni[1]) + np.abs(ni[2]) + np.abs(ni[0] - x_targets[idx - 1][0]))
+
+        # 3) Outer pair parallel
+        n_outer1 = normalize(planes[x_plane_indices[0]][:3])
+        n_outer2 = normalize(planes[x_plane_indices[3]][:3])
+        dot_outer = np.dot(n_outer1, n_outer2)
+        penalty += 1000 * (np.abs(dot_outer - (1 if outer_same_dir else -1)))
+
+        # 4) Inner pair parallel
+        n_inner1 = normalize(planes[x_plane_indices[1]][:3])
+        n_inner2 = normalize(planes[x_plane_indices[2]][:3])
+        dot_inner = np.dot(n_inner1, n_inner2)
+        penalty += 1000 * (np.abs(dot_inner - (1 if inner_same_dir else -1)))
+
+        # 5) Planes[5] and [6] separated by 60 degrees
+        n5, n6 = normalize(planes[5][:3]), normalize(planes[6][:3])
+        penalty += 1000 * (np.abs(np.dot(n5, n6) - np.cos(np.radians(60))))
+
+        # 6) Angled vs side planes = 150 deg (dot = -cos(30))
+        cos150 = np.cos(np.radians(150))
+        l_anvil = normalize(planes[x_plane_indices[1]][:3])
+        r_anvil = normalize(planes[x_plane_indices[2]][:3])
+        penalty += 1000 * (np.abs(np.dot(n5, l_anvil) - np.abs(cos150)))
+        penalty += 1000 * (np.abs(np.dot(n6, r_anvil) - np.abs(cos150)))
+
+        # 7) Unit length
+        for p in planes:
+            penalty += 1000 * (np.abs(np.linalg.norm(p[:3]) - 1))
+
+        # 8) Anvil spacing = 25 mm
+        sep = compute_anvil_separation(planes[x_plane_indices[1]], planes[x_plane_indices[2]])
+        penalty += 1000 * (np.abs(sep - 25.0))
+
+        return loss + penalty
+    
+    def on_generation(ga_instance):
+        # This function is called after each generation.
+        # You can print out relevant information here.
+        print(f"\nGeneration = {ga_instance.generations_completed}")
+        # print(f"Best solution = {ga_instance.best_solution()[0]}")
+        print(f"Fitness of the best solution = {ga_instance.best_solution()[1]}")
+        # print(f"Best solution index = {ga_instance.best_solution()[2]}")
+    
+    gene_space = [{'low': -1.0, 'high': 1.0} for _ in range(n_planes * 3)] + \
+                 [{'low': -100.0, 'high': 100.0} for _ in range(n_planes)]
+
+    initial_population = []
+    for _ in range(20):
+        jittered = copy.deepcopy(flat_params)
+        jittered += np.random.normal(0, 0.05, size=len(jittered))
+        initial_population.append(jittered)
+
+    ga_instance = pygad.GA(
+        num_generations=2000,
+        num_parents_mating=5,
+        fitness_func=objective_func,
+        sol_per_pop=len(initial_population),
+        num_genes=n_genes,
+        initial_population=initial_population,
+        gene_space=gene_space,
+        mutation_percent_genes=10,
+        mutation_type="random",
+        mutation_by_replacement=True,
+        crossover_type="single_point",
+        parent_selection_type="rank",
+        on_generation=on_generation
+    )
+
+    print("[INFO] Running Genetic Algorithm...")
+    ga_instance.run()
+
+    solution, solution_fitness, _ = ga_instance.best_solution()
+    print(f"[INFO] Optimization complete. Final fitness: {solution_fitness}")
+
+    optimized_planes = [solution[i*4:(i+1)*4] for i in range(n_planes)]
+
+    optimized_plane_meshes = []
+    for plane, cloud in zip(optimized_planes, keep_inlier_clouds):
+        mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
+        optimized_plane_meshes.append(mesh)
+
+    return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
+
+
+def optimize_all_planes_pso(keep_planes, keep_inlier_clouds):
+    """
+    Optimize planes with geometric relationship constraints (no axis alignment):
+    
+    1. Planes[1:5] are four roughly x-aligned planes:
+       - Two outer planes (far apart) - must be strictly parallel
+       - Two inner planes (close together) - must be strictly parallel  
+       - All four must be strictly orthogonal to Planes[0]
+    
+    2. Planes[0] should be roughly z-aligned (but not forced)
+    
+    3. Planes[5] and Planes[6] have 60° separation
+    
+    4. Planes[5] and Planes[6] each have 150° separation with inner planes
+    
+    5. Inner planes separated by 25mm
+    
+    The constrained parametrization ensures relationships are preserved.
+    """
+    
+    # Identify plane relationships
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(keep_planes[1:5])
+    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+    
+    # Determine initial parallel relationships
+    def should_be_same_direction(normal1, normal2):
+        n1_unit = normalize(normal1)
+        n2_unit = normalize(normal2)
+        return np.dot(n1_unit, n2_unit) > 0
+    
+    outer_same_dir = should_be_same_direction(
+        keep_planes[x_plane_indices[0]][:3], 
+        keep_planes[x_plane_indices[3]][:3]
+    )
+    inner_same_dir = should_be_same_direction(
+        keep_planes[x_plane_indices[1]][:3], 
+        keep_planes[x_plane_indices[2]][:3]
+    )
+    
+    print(f"[INFO] Outer planes same direction: {outer_same_dir}")
+    print(f"[INFO] Inner planes same direction: {inner_same_dir}")
+    
+    def params_to_planes(params):
+        """
+        Convert constrained parameter space to full plane definitions.
+        
+        Parameter space:
+        - params[0:3]: normal vector for Planes[0] (base plane)
+        - params[3]: d parameter for Planes[0]
+        - params[4:6]: direction vector for outer plane pair (will be normalized)
+        - params[6:10]: d parameters for the four x-aligned planes
+        - params[10:12]: direction vector for inner plane pair (will be normalized) 
+        - params[12]: d parameter for Planes[5]
+        - params[13]: d parameter for Planes[6]
+        - params[14:16]: direction in plane orthogonal to inner planes for Planes[5] constraint
+        - params[16:18]: direction in plane orthogonal to inner planes for Planes[6] constraint
+        """
+        
+        planes = []
+        
+        # Plane 0: Base plane (roughly z-aligned but not forced)
+        n0 = normalize(params[0:3])
+        planes.append(np.array([n0[0], n0[1], n0[2], params[3]]))
+        
+        # Construct orthogonal basis to n0
+        if np.abs(n0[2]) < 0.9:
+            basis1 = normalize(np.cross(n0, [0, 0, 1]))
+        else:
+            basis1 = normalize(np.cross(n0, [1, 0, 0]))
+        basis2 = normalize(np.cross(n0, basis1))
+        
+        # Outer plane direction (in the n0-orthogonal plane)
+        outer_dir_2d = normalize(params[4:6])
+        outer_dir = normalize(outer_dir_2d[0] * basis1 + outer_dir_2d[1] * basis2)
+        
+        # Create the two outer planes
+        outer1_normal = outer_dir
+        outer2_normal = outer_dir if outer_same_dir else -outer_dir
+        
+        inner_dir_2d = normalize(params[10:12])
+        inner_dir = normalize(inner_dir_2d[0] * basis1 + inner_dir_2d[1] * basis2)
+
+        
+        # Create the two inner planes
+        inner1_normal = inner_dir
+        inner2_normal = inner_dir if inner_same_dir else -inner_dir
+        
+        # Insert the four x-aligned planes in the correct order
+        temp_planes = [None] * 4
+        temp_planes[0] = np.array([outer1_normal[0], outer1_normal[1], outer1_normal[2], params[6]])
+        temp_planes[1] = np.array([inner1_normal[0], inner1_normal[1], inner1_normal[2], params[7]])
+        temp_planes[2] = np.array([inner2_normal[0], inner2_normal[1], inner2_normal[2], params[8]])
+        temp_planes[3] = np.array([outer2_normal[0], outer2_normal[1], outer2_normal[2], params[9]])
+        
+        # Add them in the correct global order
+        for i, local_idx in enumerate([idx_outer1, idx_inner1, idx_inner2, idx_outer2]):
+            planes.append(temp_planes[i])
+        
+        # Planes 5 and 6: Constrained by angles with inner planes
+        # Use the constraint that they have 150° with inner planes and 60° with each other
+        
+        # Get the common direction of inner planes
+        avg_inner_normal = normalize(inner1_normal + inner2_normal) if inner_same_dir else inner1_normal
+        
+        # Create orthogonal basis in the plane perpendicular to inner planes
+        if np.abs(avg_inner_normal[2]) < 0.9:
+            perp1 = normalize(np.cross(avg_inner_normal, [0, 0, 1]))
+        else:
+            perp1 = normalize(np.cross(avg_inner_normal, [1, 0, 0]))
+        perp2 = normalize(np.cross(avg_inner_normal, perp1))
+        
+        # Direction for Plane 5 in the perpendicular space
+        dir5_perp = normalize(params[14:16])
+        dir5_in_perp_space = dir5_perp[0] * perp1 + dir5_perp[1] * perp2
+        
+        # Plane 5 normal satisfying 150° constraint with inner planes
+        cos_150 = np.cos(np.radians(150))
+        sin_150 = np.sin(np.radians(150))
+        
+        n5 = cos_150 * avg_inner_normal + sin_150 * normalize(dir5_in_perp_space)
+        n5 = normalize(n5)
+        
+        # Plane 6 normal: 60° from Plane 5 and 150° from inner planes
+        cos_60 = np.cos(np.radians(60))
+        
+        # Find n6 such that n5 · n6 = cos(60°) and n6 · avg_inner = cos(150°)
+        # This constrains n6 to lie on a circle. Use the remaining parameter.
+        dir6_perp = normalize(params[16:18])
+        dir6_in_perp_space = dir6_perp[0] * perp1 + dir6_perp[1] * perp2
+        
+        # Similar construction for n6
+        n6 = cos_150 * avg_inner_normal + sin_150 * normalize(dir6_in_perp_space)
+        n6 = normalize(n6)
+        
+        # Adjust n6 to satisfy 60° constraint with n5
+        # Project n6 onto the cone around n5 with 60° half-angle
+        n5_cross_n6 = np.cross(n5, n6)
+        if np.linalg.norm(n5_cross_n6) > 1e-6:
+            axis = normalize(n5_cross_n6)
+            current_angle = np.arccos(np.clip(np.dot(n5, n6), -1, 1))
+            angle_diff = np.radians(60) - current_angle
+            
+            # Rodrigues rotation to adjust angle
+            cos_diff = np.cos(angle_diff)
+            sin_diff = np.sin(angle_diff)
+            n6 = (n6 * cos_diff + 
+                  np.cross(axis, n6) * sin_diff + 
+                  axis * np.dot(axis, n6) * (1 - cos_diff))
+            n6 = normalize(n6)
+        
+        planes.append(np.array([n5[0], n5[1], n5[2], params[12]]))
+        planes.append(np.array([n6[0], n6[1], n6[2], params[13]]))
+        
+        return planes
+    
+    def check_constraints(planes):
+        """Check how well constraints are satisfied"""
+        errors = []
+        
+        # Check orthogonality of planes 1-4 with plane 0
+        n0 = normalize(planes[0][:3])
+        for i in range(1, 5):
+            ni = normalize(planes[i][:3])
+            dot_product = np.dot(n0, ni)
+            errors.append(dot_product**2)  # Should be 0
+        
+        # Check parallelism of outer planes
+        n_outer1 = normalize(planes[x_plane_indices[0]][:3])
+        n_outer2 = normalize(planes[x_plane_indices[3]][:3])
+        if outer_same_dir:
+            errors.append((np.dot(n_outer1, n_outer2) - 1)**2)
+        else:
+            errors.append((np.dot(n_outer1, n_outer2) + 1)**2)
+        
+        # Check parallelism of inner planes
+        n_inner1 = normalize(planes[x_plane_indices[1]][:3])
+        n_inner2 = normalize(planes[x_plane_indices[2]][:3])
+        if inner_same_dir:
+            errors.append((np.dot(n_inner1, n_inner2) - 1)**2)
+        else:
+            errors.append((np.dot(n_inner1, n_inner2) + 1)**2)
+        
+        # Check 60° constraint between planes 5 and 6
+        n5 = normalize(planes[5][:3])
+        n6 = normalize(planes[6][:3])
+        cos_60 = np.cos(np.radians(60))
+        errors.append((np.dot(n5, n6) - cos_60)**2)
+        
+        # Check 150° constraints
+        cos_150 = np.cos(np.radians(150))
+        avg_inner = normalize(n_inner1 + n_inner2) if inner_same_dir else n_inner1
+        errors.append((np.dot(n5, avg_inner) - cos_150)**2)
+        errors.append((np.dot(n6, avg_inner) - cos_150)**2)
+        
+        # Check 25mm separation of inner planes
+        inner_plane1 = planes[x_plane_indices[1]]
+        inner_plane2 = planes[x_plane_indices[2]]
+        
+        na1, da1 = normalize(inner_plane1[:3]), inner_plane1[3]
+        na2, da2 = normalize(inner_plane2[:3]), inner_plane2[3]
+        
+        # Calculate distance between parallel planes
+        if inner_same_dir:
+            separation = abs(da1 - da2)
+        else:
+            separation = abs(da1 + da2)
+        
+        errors.append((separation - 25.0)**2)
+        
+        return errors
+    
+    def objective_function(params_matrix):
+        """Objective function combining fit error and constraint violations"""
+        if len(params_matrix.shape) == 1:
+            params_matrix = params_matrix.reshape(1, -1)
+            
+        n_particles = params_matrix.shape[0]
+        fitness = np.zeros(n_particles)
+        
+        penalty_weight = 1e6
+        
+        for i in range(n_particles):
+            params = params_matrix[i]
+            
+            try:
+                planes = params_to_planes(params)
+                
+                # Calculate fit error
+                fit_error = 0.0
+                for j, plane in enumerate(planes):
+                    n = normalize(plane[:3])
+                    d = plane[3]
+                    pts = np.asarray(keep_inlier_clouds[j].points)
+                    residuals = pts @ n + d
+                    fit_error += np.sum(residuals**2)
+                
+                # Calculate constraint violations
+                constraint_errors = check_constraints(planes)
+                total_violation = np.sum(constraint_errors)
+                
+                fitness[i] = fit_error + penalty_weight * total_violation
+                
+            except Exception as e:
+                fitness[i] = 1e10
+        
+        return fitness
+    
+    # Extract initial parameters from current planes
+    initial_params = []
+    
+    # Plane 0 normal and d
+    initial_params.extend(keep_planes[0][:3])  # normal
+    initial_params.append(keep_planes[0][3])   # d
+    
+    # Outer plane direction (from first outer plane)
+    outer_normal = normalize(keep_planes[x_plane_indices[0]][:3])
+    initial_params.extend(outer_normal[:2])  # Only need 2 components, normalize anyway
+    
+    # D parameters for x-aligned planes
+    for idx in x_plane_indices:
+        initial_params.append(keep_planes[idx][3])
+    
+    # Inner plane direction (from first inner plane)
+    inner_normal = normalize(keep_planes[x_plane_indices[1]][:3])
+    initial_params.extend(inner_normal[:2])
+    
+    # D parameters for planes 5 and 6
+    initial_params.append(keep_planes[5][3])
+    initial_params.append(keep_planes[6][3])
+    
+    # Direction parameters for planes 5 and 6 (initial guess)
+    initial_params.extend([1.0, 0.0])  # direction for plane 5
+    initial_params.extend([0.0, 1.0])  # direction for plane 6
+    
+    # Set bounds
+    bounds_low = []
+    bounds_high = []
+    
+    for i, param in enumerate(initial_params):
+        if i < 3:  # Normal vector components
+            bounds_low.append(-2.0)
+            bounds_high.append(2.0)
+        elif i == 3 or (6 <= i <= 9) or i == 12 or i == 13:  # D parameters
+            bounds_low.append(param - 50.0)
+            bounds_high.append(param + 50.0)
+        else:  # Direction parameters
+            bounds_low.append(-2.0)
+            bounds_high.append(2.0)
+    
+    bounds = list(zip(bounds_low, bounds_high))
+    
+    print(f"[INFO] Using geometric constraint parametrization")
+    print(f"[INFO] Parameter space dimension: {len(initial_params)}")
+    print(f"[INFO] X-plane indices: {x_plane_indices}")
+    
+    # Use Differential Evolution
+    def de_objective(params):
+        return objective_function(params)[0]
+    
+    result = differential_evolution(
+        de_objective,
+        bounds=bounds,
+        seed=42,
+        maxiter=1000,
+        popsize=15,
+        atol=1e-10,
+        tol=1e-10
+    )
+    
+    print(f"[INFO] DE optimization completed. Success: {result.success}")
+    print(f"[INFO] Final cost: {result.fun}")
+    
+    if not result.success:
+        print(f"[WARNING] Optimization failed: {result.message}")
+    
+    # Convert final parameters back to planes
+    optimized_planes = params_to_planes(result.x)
+    
+    # Verify constraints
+    print("\n[INFO] Constraint verification:")
+    constraint_errors = check_constraints(optimized_planes)
+    
+    print(f"Orthogonality errors (planes 1-4 vs plane 0): {[f'{e:.6f}' for e in constraint_errors[:4]]}")
+    print(f"Outer plane parallelism error: {constraint_errors[4]:.6f}")
+    print(f"Inner plane parallelism error: {constraint_errors[5]:.6f}")
+    print(f"60° constraint error: {constraint_errors[6]:.6f}")
+    print(f"150° constraint errors: {constraint_errors[7]:.6f}, {constraint_errors[8]:.6f}")
+    print(f"25mm separation error: {constraint_errors[9]:.6f}")
+    
+    # Check actual angles
+    n5 = normalize(optimized_planes[5][:3])
+    n6 = normalize(optimized_planes[6][:3])
+    angle_56 = np.degrees(np.arccos(np.clip(np.dot(n5, n6), -1, 1)))
+    print(f"Actual angle between planes 5&6: {angle_56:.2f}°")
+    
+    # Create placeholder meshes
+    optimized_plane_meshes = [None] * len(optimized_planes)
+    
+    return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
+
+
 def separation_between_parallel_planes(plane1, plane2):
     """
     Computes the perpendicular distance between two parallel planes.
@@ -2128,29 +3206,55 @@ def create_cylinder_relative_to_planes(
         intersection_at_y0 = np.linalg.lstsq(A_extended, b_extended, rcond=None)[0]
     
     # Apply offsets in world coordinates
-    # Determine world coordinate directions based on plane orientations
+    # For axis-aligned planes, determine offset direction based on desired world coordinate direction
+    
+    # Handle plane1 offset
     if np.allclose(np.abs(n1), [0, 0, 1]):  # plane1 is Z-aligned
-        plane1_offset_vector = np.array([0, 0, plane1_offset])
+        # We want positive offset to mean more positive Z
+        # If normal points in +Z, offset in +Z direction
+        # If normal points in -Z, offset in -Z direction (away from plane)
+        plane1_offset_vector = np.array([0, 0, plane1_offset * np.sign(n1[2])])
     elif np.allclose(np.abs(n1), [1, 0, 0]):  # plane1 is X-aligned
-        plane1_offset_vector = np.array([plane1_offset, 0, 0])
+        # We want positive offset to mean more positive X
+        plane1_offset_vector = np.array([plane1_offset * np.sign(n1[0]), 0, 0])
     elif np.allclose(np.abs(n1), [0, 1, 0]):  # plane1 is Y-aligned
-        plane1_offset_vector = np.array([0, plane1_offset, 0])
+        # We want positive offset to mean more positive Y
+        plane1_offset_vector = np.array([0, plane1_offset * np.sign(n1[1]), 0])
     else:
         # For non-axis-aligned planes, offset along the normal
-        # but ensure positive offset moves away from origin
-        world_direction = n1 if np.dot(n1, n1) > 0 else -n1
-        plane1_offset_vector = world_direction * plane1_offset
+        # Positive offset moves in direction of normal
+        plane1_offset_vector = n1 * plane1_offset
     
+    # Handle plane2 offset
     if np.allclose(np.abs(n2), [0, 0, 1]):  # plane2 is Z-aligned
-        plane2_offset_vector = np.array([0, 0, plane2_offset])
+        # We want positive offset to mean more positive Z
+        plane2_offset_vector = np.array([0, 0, plane2_offset * np.sign(n2[2])])
     elif np.allclose(np.abs(n2), [1, 0, 0]):  # plane2 is X-aligned
+        # We want positive offset to increase X coordinate
+        # Always offset in +X direction regardless of normal direction
         plane2_offset_vector = np.array([plane2_offset, 0, 0])
     elif np.allclose(np.abs(n2), [0, 1, 0]):  # plane2 is Y-aligned
-        plane2_offset_vector = np.array([0, plane2_offset, 0])
+        # We want positive offset to mean more positive Y
+        plane2_offset_vector = np.array([0, plane2_offset * np.sign(n2[1]), 0])
     else:
-        # For non-axis-aligned planes, offset along the normal
-        world_direction = n2 if np.dot(n2, n2) > 0 else -n2
-        plane2_offset_vector = world_direction * plane2_offset
+        # For nearly-axis-aligned planes, determine the dominant axis
+        abs_n2 = np.abs(n2)
+        dominant_axis = np.argmax(abs_n2)
+        
+        if dominant_axis == 0:  # Nearly X-aligned
+            # We want positive offset to increase X coordinate
+            plane2_offset_vector = np.array([plane2_offset, 0, 0])
+        elif dominant_axis == 1:  # Nearly Y-aligned
+            # We want positive offset to increase Y coordinate
+            plane2_offset_vector = np.array([0, plane2_offset, 0])
+        else:  # Nearly Z-aligned
+            # We want positive offset to increase Z coordinate
+            plane2_offset_vector = np.array([0, 0, plane2_offset])
+        
+        # For safety, also handle the truly non-axis-aligned case
+        # (though you said this shouldn't happen in your use case)
+        if np.max(abs_n2) < 0.9:  # Not close to any axis
+            plane2_offset_vector = n2 * plane2_offset
     
     # Calculate where we want the final cylinder center to be
     desired_final_center = intersection_at_y0 + plane1_offset_vector + plane2_offset_vector
@@ -2695,7 +3799,10 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = detect_fixture_planes(base_pcd, target_axes)
     keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = fixture_plane_fitting.create_model(fixture_scan_path, expected_planes, visualization=True)
     
-    optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_pso(keep_planes, keep_inlier_clouds)
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic(keep_planes, keep_inlier_clouds)
+    optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic_v2(keep_planes, keep_inlier_clouds)
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
     
     # Verification of constraints
     print("")
