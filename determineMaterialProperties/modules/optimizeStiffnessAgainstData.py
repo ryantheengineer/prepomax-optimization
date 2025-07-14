@@ -234,26 +234,26 @@ def objective_fun(modulus, params):
     logger.info(f'Absolute Difference:\t{diff}')
     logger.info(f'Optimization History:\n{optHistory}')
     
-    # # PLOT
-    # fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
-    # # Plot data on each subplot
-    # axes[0].plot(optHistory[:, 0])
-    # axes[0].set_title('Modulus of Elasticity (MPa)')
-    # axes[0].set_xlabel('Iteration')
+    # PLOT
+    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
+    # Plot data on each subplot
+    axes[0].plot(optHistory[:, 0])
+    axes[0].set_title('Modulus of Elasticity (MPa)')
+    axes[0].set_xlabel('Iteration')
     
-    # axes[1].plot(optHistory[:, 1])
-    # axes[1].set_title('Regression Stiffness (N/mm)')
-    # axes[1].set_xlabel('Iteration')
+    axes[1].plot(optHistory[:, 1])
+    axes[1].set_title('Regression Stiffness (N/mm)')
+    axes[1].set_xlabel('Iteration')
     
-    # axes[2].plot(optHistory[:, 2])
-    # axes[2].set_title(
-    #     f'Difference in Regression Stiffness from Target {params["target_stiffness"]} (N/mm)')
-    # axes[2].set_xlabel('Iteration')
+    axes[2].plot(optHistory[:, 2])
+    axes[2].set_title(
+        f'Difference in Regression Stiffness from Target {params["target_stiffness"]} (N/mm)')
+    axes[2].set_xlabel('Iteration')
     
-    # plt.suptitle('Optimization Performance')
+    plt.suptitle('Optimization Performance')
     
-    # fig.tight_layout()  # to ensure the right y-label is not slightly clipped
+    fig.tight_layout()  # to ensure the right y-label is not slightly clipped
     
-    # plt.show()
+    plt.show()
 
     return diff
