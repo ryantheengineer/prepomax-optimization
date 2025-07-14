@@ -58,7 +58,7 @@ def align_mesh_with_pca(input_path, output_prefix):
     # print(f"Exporting to {export_path}")
     mesh_v2_rot.export(export_path)
 
-    print(f"Processed: {os.path.basename(input_path)}")
+    print(f"Aligned mesh with PCA: {os.path.basename(input_path)}")
     
 def process_scans(input_folder, output_folder):
     stl_files = glob.glob(os.path.join(input_folder, "*.stl"))
