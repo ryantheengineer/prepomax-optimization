@@ -260,7 +260,7 @@ def terminate_instance():
         instance_id = response.text
         print(f"Terminating instance: {instance_id}")
         
-        ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2b'))
+        ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2'))
         ec2.terminate_instances(InstanceIds=[instance_id])
         
         # Sleep to allow shutdown
