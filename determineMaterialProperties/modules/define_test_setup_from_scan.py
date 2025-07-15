@@ -2872,6 +2872,8 @@ def optimize_all_planes_genetic_v2_fixed(keep_planes, keep_inlier_clouds):
     anvil_plane1 = keep_planes[5]
     anvil_plane2 = keep_planes[6]
     
+    
+    
     # Create consistent copies without flipping - preserve original orientations
     planes = [copy.deepcopy(base_plane),
               copy.deepcopy(outer_plane1),
@@ -3123,7 +3125,23 @@ def optimize_all_planes_genetic_v2_fixed(keep_planes, keep_inlier_clouds):
     print(f"\n[INFO] Optimization complete. Final fitness: {solution_fitness}")
     
     # Analyze the changes
-    optimized_planes = create_planes_from_params_fixed(solution)
+    solution_planes = create_planes_from_params_fixed(solution)
+    
+    # Insert the elements of keep_planes that were not included in the optimization, in their original positions
+    # planes = [copy.deepcopy(base_plane),
+    #           copy.deepcopy(outer_plane1),
+    #           copy.deepcopy(outer_plane2),
+    #           copy.deepcopy(inner_plane1),
+    #           copy.deepcopy(inner_plane2),
+    #           copy.deepcopy(anvil_plane1),
+    #           copy.deepcopy(anvil_plane2)]
+    optimized_planes = [solution_planes[0],
+                        solution_planes[1],
+                        solution_planes[2],
+                        planes[3],
+                        planes[4],
+                        planes[5],
+                        planes[6]]
     
     print("\n[INFO] Orientation changes:")
     for i, (original, optimized) in enumerate(zip(planes, optimized_planes)):
@@ -3157,8 +3175,665 @@ def optimize_all_planes_genetic_v2_fixed(keep_planes, keep_inlier_clouds):
     
     
     
-
-
+def optimize_plane_orientations(keep_planes, keep_inlier_clouds):
+    """
+    Optimize orientations of only the base and support planes, and orient the
+    point cloud based on that.
+    """
+    # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
+    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(keep_planes[1:5])
+    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+    
+    # Get original planes
+    base_plane = keep_planes[0]
+    outer_plane1 = keep_planes[x_plane_indices[0]]
+    outer_plane2 = keep_planes[x_plane_indices[3]]
+    # inner_plane1 = keep_planes[x_plane_indices[1]]
+    # inner_plane2 = keep_planes[x_plane_indices[2]]
+    # anvil_plane1 = keep_planes[5]
+    # anvil_plane2 = keep_planes[6]
+    
+    def angle_between_plane_and_axis(plane, axis):
+        """
+        plane: array-like of 4 values [a, b, c, d] defining plane ax + by + cz + d = 0
+        axis: array-like of 3 values [x, y, z] representing axis direction
+    
+        Returns angle in degrees between the plane's normal and the axis.
+        """
+        normal = np.array(plane[:3])
+        axis = np.array(axis)
+        normal = normal / np.linalg.norm(normal)
+        axis = axis / np.linalg.norm(axis)
+        angle_rad = np.arccos(np.clip(np.abs(np.dot(normal, axis)), 0.0, 1.0))
+        return np.degrees(angle_rad)
+    
+    def angle_between_plane_normals(plane1, plane2):
+        """
+        plane1, plane2: array-like of 4 values each [a, b, c, d]
+        
+        Returns angle in degrees between the two plane normals.
+        """
+        n1 = np.array(plane1[:3])
+        n2 = np.array(plane2[:3])
+        n1 = n1 / np.linalg.norm(n1)
+        n2 = n2 / np.linalg.norm(n2)
+        angle_rad = np.arccos(np.clip(np.abs(np.dot(n1, n2)), 0.0, 1.0))
+        return np.degrees(angle_rad)
+    
+    # Quick check for relative angles of elements of keep_planes
+    base_plane_angle_Z = angle_between_plane_and_axis(base_plane, [0, 0, 1])
+    outer_plane1_angle_X = angle_between_plane_and_axis(outer_plane1, [1, 0, 0])
+    outer_plane2_angle_X = angle_between_plane_and_axis(outer_plane2, [1, 0, 0])
+    print('\nAngles between detected planes and axes:')
+    print(f'Base Plane to Z:\t{base_plane_angle_Z:.3f} degrees')
+    print(f'Outer Plane 1 to X:\t{outer_plane1_angle_X:.3f} degrees')
+    print(f'Outer Plane 2 to X:\t{outer_plane2_angle_X:.3f} degrees')
+    
+    base_outer_1 = angle_between_plane_normals(base_plane, outer_plane1)
+    base_outer_2 = angle_between_plane_normals(base_plane, outer_plane2)
+    outer_1_2 = angle_between_plane_normals(outer_plane1, outer_plane2)
+    print(f'\nAngle between base plane and outer 1:\t{base_outer_1:.3f}')
+    print(f'Angle between base plane and outer 2:\t{base_outer_2:.3f}')
+    print(f'Angle between outer 1 and outer 2:\t{outer_1_2:.3f}')
+    
+    # Create consistent copies without flipping - preserve original orientations
+    planes = [copy.deepcopy(base_plane),
+              copy.deepcopy(outer_plane1),
+              copy.deepcopy(outer_plane2)]
+              # copy.deepcopy(inner_plane1),
+              # copy.deepcopy(inner_plane2),
+              # copy.deepcopy(anvil_plane1),
+              # copy.deepcopy(anvil_plane2)]
+    
+    # Ensure all planes have unit normals
+    for i, plane in enumerate(planes):
+        normal = plane[:3]
+        norm_mag = np.linalg.norm(normal)
+        if norm_mag > 1e-10:
+            planes[i] = np.array([normal[0]/norm_mag, normal[1]/norm_mag, 
+                                 normal[2]/norm_mag, plane[3]/norm_mag])
+    
+    # Extract reference orientations and distances
+    base_normal = planes[0][:3]
+    base_distance = abs(planes[0][3])
+    
+    outer1_normal = planes[1][:3]
+    outer1_distance = abs(planes[1][3])
+    
+    outer2_normal = planes[2][:3]
+    outer2_distance = abs(planes[2][3])
+    
+    # inner1_normal = planes[3][:3]
+    # inner1_distance = abs(planes[3][3])
+    
+    # anvil1_normal = planes[5][:3]
+    # anvil1_distance = abs(planes[5][3])
+    
+    # anvil2_normal = planes[6][:3]
+    # anvil2_distance = abs(planes[6][3])
+    
+    # # Calculate current separation between inner planes
+    # current_inner_separation = abs(planes[4][3] - planes[3][3])
+    
+    # # Calculate original relative angles for anvil planes
+    # anvil1_angle_to_base = np.arccos(np.clip(np.dot(base_normal, anvil1_normal), -1, 1))
+    # anvil2_angle_to_base = np.arccos(np.clip(np.dot(base_normal, anvil2_normal), -1, 1))
+    
+    # # Store original rotation axes for anvil planes
+    # anvil1_rotation_axis = np.cross(base_normal, anvil1_normal)
+    # if np.linalg.norm(anvil1_rotation_axis) > 1e-10:
+    #     anvil1_rotation_axis = anvil1_rotation_axis / np.linalg.norm(anvil1_rotation_axis)
+    # else:
+    #     anvil1_rotation_axis = np.array([0, 1, 0])  # Default to Y axis
+    
+    # anvil2_rotation_axis = np.cross(base_normal, anvil2_normal)
+    # if np.linalg.norm(anvil2_rotation_axis) > 1e-10:
+    #     anvil2_rotation_axis = anvil2_rotation_axis / np.linalg.norm(anvil2_rotation_axis)
+    # else:
+    #     anvil2_rotation_axis = np.array([0, 1, 0])  # Default to Y axis
+    
+    # Set up optimization parameters with tighter bounds
+    d_tol = 5.0  # Reduced from 10.0
+    angle_tol = np.radians(1.0)  # Reduced to 1.0 degrees for tighter control
+    
+    # Parameters: [base_nx, base_ny, base_nz, base_d, outer1_d, outer2_d, inner1_d, anvil1_d, anvil2_d]
+    # We'll optimize the normal directly instead of spherical coordinates
+    initial_params = [
+        base_normal[0], base_normal[1], base_normal[2], base_distance,
+        outer1_distance, outer2_distance
+    ]
+    
+    # Create bounds that constrain changes to small adjustments
+    normal_tol = 0.05  # Reduced from 0.1 for tighter control
+    gene_space = [
+        {'low': base_normal[0] - normal_tol, 'high': base_normal[0] + normal_tol},  # base_nx
+        {'low': base_normal[1] - normal_tol, 'high': base_normal[1] + normal_tol},  # base_ny
+        {'low': base_normal[2] - normal_tol, 'high': base_normal[2] + normal_tol},  # base_nz
+        {'low': max(0.1, base_distance - d_tol), 'high': base_distance + d_tol},   # base_d
+        {'low': max(0.1, outer1_distance - d_tol), 'high': outer1_distance + d_tol}, # outer1_d
+        {'low': max(0.1, outer2_distance - d_tol), 'high': outer2_distance + d_tol}, # outer2_d
+    ]
+    
+    def rodrigues_rotation(vector, axis, angle):
+        """Apply Rodrigues' rotation formula to rotate vector around axis by angle."""
+        axis = axis / np.linalg.norm(axis)
+        cos_angle = np.cos(angle)
+        sin_angle = np.sin(angle)
+        
+        rotated = (vector * cos_angle + 
+                  np.cross(axis, vector) * sin_angle + 
+                  axis * np.dot(axis, vector) * (1 - cos_angle))
+        
+        return rotated / np.linalg.norm(rotated)
+    
+    def create_planes_from_params_fixed(params):
+        """
+        Create plane definitions from parameter values while preserving orientations
+        and enforcing exact relative angles.
+        """
+        # Extract parameters
+        base_nx, base_ny, base_nz, base_d = params[:4]
+        outer1_d, outer2_d = params[4:]
+        
+        # Normalize base normal
+        base_normal = np.array([base_nx, base_ny, base_nz])
+        base_normal = base_normal / np.linalg.norm(base_normal)
+        
+        # Create base plane
+        base_plane = np.array([base_normal[0], base_normal[1], base_normal[2], -base_d])
+        
+        # Calculate orthogonal directions in the original coordinate system
+        # Project original normals onto plane perpendicular to base normal
+        def project_to_perpendicular_plane(vector, normal):
+            """Project vector onto plane perpendicular to normal."""
+            projected = vector - np.dot(vector, normal) * normal
+            return projected / np.linalg.norm(projected)
+        
+        # Get original orthogonal directions by projecting original normals
+        base_to_outer1 = project_to_perpendicular_plane(outer1_normal, base_normal)
+        # base_to_inner1 = project_to_perpendicular_plane(inner1_normal, base_normal)
+        
+        # Create outer planes (preserve original direction relative to base)
+        outer_plane1 = np.array([base_to_outer1[0], base_to_outer1[1], base_to_outer1[2], -outer1_d])
+        outer_plane2 = np.array([base_to_outer1[0], base_to_outer1[1], base_to_outer1[2], -outer2_d])
+        
+        # Create inner planes (preserve original direction relative to base)
+        # inner_plane1 = np.array([base_to_inner1[0], base_to_inner1[1], base_to_inner1[2], -inner1_d])
+        # inner_plane2 = np.array([base_to_inner1[0], base_to_inner1[1], base_to_inner1[2], -(inner1_d + 25.0)])
+        
+        # Create anvil planes with EXACT relative angles
+        # Apply the original rotation from base to anvil planes to the current base normal
+        # anvil1_direction = rodrigues_rotation(base_normal, anvil1_rotation_axis, anvil1_angle_to_base)
+        # anvil2_direction = rodrigues_rotation(base_normal, anvil2_rotation_axis, anvil2_angle_to_base)
+        
+        # anvil_plane1 = np.array([anvil1_direction[0], anvil1_direction[1], anvil1_direction[2], -anvil1_d])
+        # anvil_plane2 = np.array([anvil2_direction[0], anvil2_direction[1], anvil2_direction[2], -anvil2_d])
+        
+        return [base_plane, outer_plane1, outer_plane2]
+    
+    def objective_fixed(ga_instance, solution, solution_idx):
+        """
+        Objective function that penalizes large orientation changes and enforces
+        exact relative angles for anvil planes.
+        """
+        try:
+            optimized_planes = create_planes_from_params_fixed(solution)
+            
+            # Calculate fitting error
+            fitting_loss = 0.0
+            for i, plane in enumerate(optimized_planes):
+                n = plane[:3]
+                n = n / np.linalg.norm(n)
+                d = plane[3]
+                pts = np.asarray(keep_inlier_clouds[i].points)
+                res = pts @ n + d
+                fitting_loss += np.sum(res**2)
+            
+            # Add penalty for large orientation changes (except anvil planes)
+            orientation_penalty = 0.0
+            
+            # Check first 5 planes (base, outer, inner)
+            for i in range(len(optimized_planes)):
+                original_normal = planes[i][:3]
+                optimized_normal = optimized_planes[i][:3]
+                
+                # Calculate angle between normals
+                cos_angle = np.clip(np.dot(original_normal, optimized_normal), -1, 1)
+                angle_change = np.arccos(abs(cos_angle))
+                
+                # Penalize large changes
+                if angle_change > angle_tol:
+                    orientation_penalty += 1000 * (angle_change - angle_tol)**2
+            
+            # Verify anvil planes maintain exact relative angles
+            # anvil_angle_penalty = 0.0
+            current_base_normal = optimized_planes[0][:3]
+            
+            # Check anvil plane 1 angle
+            # current_anvil1_angle = np.arccos(np.clip(np.dot(current_base_normal, optimized_planes[5][:3]), -1, 1))
+            # anvil1_angle_error = abs(current_anvil1_angle - anvil1_angle_to_base)
+            # anvil_angle_penalty += 10000 * anvil1_angle_error**2
+            
+            # Check anvil plane 2 angle
+            # current_anvil2_angle = np.arccos(np.clip(np.dot(current_base_normal, optimized_planes[6][:3]), -1, 1))
+            # anvil2_angle_error = abs(current_anvil2_angle - anvil2_angle_to_base)
+            # anvil_angle_penalty += 10000 * anvil2_angle_error**2
+            
+            # Add penalty for Y-axis rotation drift
+            # Check if the overall coordinate system has rotated about Y
+            # y_axis = np.array([0, 1, 0])
+            # original_base_projected = planes[0][:3] - np.dot(planes[0][:3], y_axis) * y_axis
+            # current_base_projected = current_base_normal - np.dot(current_base_normal, y_axis) * y_axis
+            
+            # if np.linalg.norm(original_base_projected) > 1e-10 and np.linalg.norm(current_base_projected) > 1e-10:
+            #     original_base_projected = original_base_projected / np.linalg.norm(original_base_projected)
+            #     current_base_projected = current_base_projected / np.linalg.norm(current_base_projected)
+                
+            #     y_rotation_angle = np.arccos(np.clip(np.dot(original_base_projected, current_base_projected), -1, 1))
+            #     y_rotation_penalty = 5000 * y_rotation_angle**2
+            # else:
+            #     y_rotation_penalty = 0.0
+            
+            # Combined objective (maximize)
+            total_loss = fitting_loss + orientation_penalty
+            
+            # Return fitness (higher is better)
+            return 1.0 / (1.0 + total_loss)
+            
+        except Exception as e:
+            print(f"Error in objective function: {e}")
+            return 1e-10  # Very low fitness for invalid solutions
+    
+    # Create initial population with smaller perturbations
+    initial_population = []
+    for _ in range(50):  # Smaller population
+        jittered = copy.deepcopy(initial_params)
+        # Much smaller jittering to avoid Y-axis rotation
+        jittered += np.random.normal(0, 0.01, size=len(jittered))  # Reduced from 0.02
+        initial_population.append(jittered)
+    
+    # Add the original solution to the population
+    initial_population[0] = initial_params
+    
+    print("[INFO] Running Fixed Genetic Algorithm...")
+    num_generations = 500  # Increased for better convergence
+    
+    with tqdm(total=num_generations) as pbar:
+        ga_instance = pygad.GA(
+            num_generations=num_generations,
+            num_parents_mating=15,  # Increased for better diversity
+            fitness_func=objective_fixed,
+            sol_per_pop=len(initial_population),
+            num_genes=len(initial_params),
+            initial_population=initial_population,
+            gene_space=gene_space,
+            mutation_num_genes=1,  # Reduced mutation to single gene
+            mutation_type="random",
+            mutation_by_replacement=True,
+            mutation_probability=0.05,  # Lower mutation probability
+            crossover_type="single_point",
+            parent_selection_type="tournament",
+            on_generation=lambda _: pbar.update(1),
+        )
+        
+        ga_instance.run()
+    
+    # Get results
+    solution, solution_fitness, _ = ga_instance.best_solution()
+    print(f"\n[INFO] Optimization complete. Final fitness: {solution_fitness}")
+    
+    # # Analyze the changes
+    # optimized_planes = create_planes_from_params_fixed(solution)
+    
+    # Analyze the changes
+    solution_planes = create_planes_from_params_fixed(solution)
+    
+    # Insert the elements of keep_planes that were not included in the optimization, in their original positions
+    optimized_planes = [solution_planes[0],
+                        solution_planes[1],
+                        solution_planes[2],
+                        keep_planes[x_plane_indices[1]],
+                        keep_planes[x_plane_indices[2]],
+                        keep_planes[5],
+                        keep_planes[6]]
+    
+    print("\n[INFO] Orientation changes:")
+    for i, (original, optimized) in enumerate(zip(planes, optimized_planes)):
+        orig_normal = original[:3]
+        opt_normal = optimized[:3]
+        
+        cos_angle = np.clip(np.dot(orig_normal, opt_normal), -1, 1)
+        angle_change = np.degrees(np.arccos(abs(cos_angle)))
+        
+        print(f"Plane {i}: {angle_change:.3f}° change")
+    
+    # Verify anvil angles
+    print("\n[INFO] Anvil plane angle verification:")
+    current_base_normal = optimized_planes[0][:3]
+    
+    # current_anvil1_angle = np.degrees(np.arccos(np.clip(np.dot(current_base_normal, optimized_planes[5][:3]), -1, 1)))
+    # original_anvil1_angle = np.degrees(anvil1_angle_to_base)
+    # print(f"Anvil 1: Original={original_anvil1_angle:.3f}°, Current={current_anvil1_angle:.3f}°, Error={abs(current_anvil1_angle - original_anvil1_angle):.3f}°")
+    
+    # current_anvil2_angle = np.degrees(np.arccos(np.clip(np.dot(current_base_normal, optimized_planes[6][:3]), -1, 1)))
+    # original_anvil2_angle = np.degrees(anvil2_angle_to_base)
+    # print(f"Anvil 2: Original={original_anvil2_angle:.3f}°, Current={current_anvil2_angle:.3f}°, Error={abs(current_anvil2_angle - original_anvil2_angle):.3f}°")
+    
+    # Create plane meshes
+    optimized_plane_meshes = []
+    for plane, cloud in zip(optimized_planes, keep_inlier_clouds):
+        mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
+        optimized_plane_meshes.append(mesh)
+    
+    return optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds
+    
+    
+    
+def optimize_anvil_planes(planes_list, inlier_clouds_list, plane_indices):
+    plane1 = planes_list[0]
+    plane2 = planes_list[1]
+    reference_plane = planes_list[2]
+    
+    cloud1 = inlier_clouds_list[0]
+    cloud2 = inlier_clouds_list[1]
+    
+    # plane_idx1 = plane_indices[0]
+    # plane_idx2 = plane_indices[1]
+    # reference_plane_idx = plane_indices[2]
+    plane_idx1 = 0
+    plane_idx2 = 1
+    reference_plane_idx = 2
+    
+    separation_distance = 25.0
+    
+    # Normalize all planes
+    for i, plane in enumerate([plane1, plane2, reference_plane]):
+        normal = plane[:3]
+        norm_mag = np.linalg.norm(normal)
+        if norm_mag > 1e-10:
+            if i == 0:
+                plane1 = np.array([normal[0]/norm_mag, normal[1]/norm_mag, normal[2]/norm_mag, plane[3]/norm_mag])
+            elif i == 1:
+                plane2 = np.array([normal[0]/norm_mag, normal[1]/norm_mag, normal[2]/norm_mag, plane[3]/norm_mag])
+            else:
+                reference_plane = np.array([normal[0]/norm_mag, normal[1]/norm_mag, normal[2]/norm_mag, plane[3]/norm_mag])
+    
+    # Get reference plane normal
+    ref_normal = reference_plane[:3]
+    
+    # Calculate original orientation of the parallel planes
+    # Use the average of the two original normals projected onto the orthogonal space
+    original_normal1 = plane1[:3]
+    original_normal2 = plane2[:3]
+    
+    # Project both normals onto the space orthogonal to reference plane
+    proj_normal1 = original_normal1 - np.dot(original_normal1, ref_normal) * ref_normal
+    proj_normal2 = original_normal2 - np.dot(original_normal2, ref_normal) * ref_normal
+    
+    # Use the average as the initial direction
+    if np.linalg.norm(proj_normal1) > 1e-10 and np.linalg.norm(proj_normal2) > 1e-10:
+        proj_normal1 = proj_normal1 / np.linalg.norm(proj_normal1)
+        proj_normal2 = proj_normal2 / np.linalg.norm(proj_normal2)
+        initial_direction = (proj_normal1 + proj_normal2) / 2.0
+        initial_direction = initial_direction / np.linalg.norm(initial_direction)
+    else:
+        # Fallback: create an orthogonal direction
+        if abs(ref_normal[2]) < 0.9:
+            initial_direction = np.array([0, 0, 1])
+        else:
+            initial_direction = np.array([1, 0, 0])
+        initial_direction = initial_direction - np.dot(initial_direction, ref_normal) * ref_normal
+        initial_direction = initial_direction / np.linalg.norm(initial_direction)
+    
+    # Calculate initial distances
+    pts1 = np.asarray(cloud1.points)
+    pts2 = np.asarray(cloud2.points)
+    
+    initial_dist1 = np.median(-pts1 @ initial_direction)
+    initial_dist2 = np.median(-pts2 @ initial_direction)
+    
+    # Ensure proper separation
+    if initial_dist2 < initial_dist1:
+        initial_dist2 = initial_dist1 + separation_distance
+    
+    print(f"[INFO] Optimizing planes {plane_idx1} and {plane_idx2} to be parallel and orthogonal to plane {reference_plane_idx}")
+    print(f"[INFO] Target separation: {separation_distance:.2f}mm")
+    print(f"[INFO] Initial distances: {initial_dist1:.2f}mm, {initial_dist2:.2f}mm")
+    
+    # Optimization parameters
+    # We'll parameterize the orthogonal direction using two angles (spherical coordinates)
+    # Parameters: [theta, phi, dist1, dist2]
+    # where theta and phi define the direction orthogonal to reference plane
+    
+    def direction_to_spherical(direction, ref_normal):
+        """Convert a direction vector to spherical coordinates in the orthogonal space."""
+        # Create orthogonal basis
+        if abs(ref_normal[2]) < 0.9:
+            u = np.array([0, 0, 1])
+        else:
+            u = np.array([1, 0, 0])
+        
+        u = u - np.dot(u, ref_normal) * ref_normal
+        u = u / np.linalg.norm(u)
+        
+        v = np.cross(ref_normal, u)
+        v = v / np.linalg.norm(v)
+        
+        # Project direction onto orthogonal plane
+        proj_dir = direction - np.dot(direction, ref_normal) * ref_normal
+        proj_dir = proj_dir / np.linalg.norm(proj_dir)
+        
+        # Get coordinates in orthogonal basis
+        x = np.dot(proj_dir, u)
+        y = np.dot(proj_dir, v)
+        
+        # Convert to spherical
+        theta = np.arctan2(y, x)
+        
+        return theta, u, v
+    
+    def spherical_to_direction(theta, u, v):
+        """Convert spherical coordinates back to direction vector."""
+        direction = np.cos(theta) * u + np.sin(theta) * v
+        return direction / np.linalg.norm(direction)
+    
+    # Get initial spherical coordinates
+    initial_theta, u_basis, v_basis = direction_to_spherical(initial_direction, ref_normal)
+    
+    # Initial parameters
+    initial_params = [initial_theta, initial_dist1, initial_dist2]
+    
+    # Parameter bounds
+    theta_tol = np.radians(10.0)  # Allow 10 degrees of rotation
+    dist_tol = 5.0  # Allow 5mm distance variation
+    
+    gene_space = [
+        {'low': initial_theta - theta_tol, 'high': initial_theta + theta_tol},  # theta
+        {'low': max(0.1, initial_dist1 - dist_tol), 'high': initial_dist1 + dist_tol},  # dist1
+        {'low': max(0.1, initial_dist2 - dist_tol), 'high': initial_dist2 + dist_tol},  # dist2
+    ]
+    
+    def create_optimized_planes(params):
+        """Create the two optimized planes from parameters."""
+        theta, dist1, dist2 = params
+        
+        # Get the direction vector
+        direction = spherical_to_direction(theta, u_basis, v_basis)
+        
+        # Ensure proper separation
+        if dist2 < dist1:
+            dist2 = dist1 + separation_distance
+        elif abs(dist2 - dist1) < separation_distance * 0.9:
+            # Maintain minimum separation
+            dist2 = dist1 + separation_distance
+        
+        # Create the two planes
+        plane1_opt = np.array([direction[0], direction[1], direction[2], -dist1])
+        plane2_opt = np.array([direction[0], direction[1], direction[2], -dist2])
+        
+        return plane1_opt, plane2_opt
+    
+    def objective_function(ga_instance, solution, solution_idx):
+        """Objective function for optimization."""
+        try:
+            theta, dist1, dist2 = solution
+            
+            # Create optimized planes
+            plane1_opt, plane2_opt = create_optimized_planes(solution)
+            
+            # Calculate fitting error for both planes
+            fitting_loss = 0.0
+            
+            # Plane 1 fitting
+            n1 = plane1_opt[:3]
+            d1 = plane1_opt[3]
+            res1 = pts1 @ n1 + d1
+            fitting_loss += np.sum(res1**2)
+            
+            # Plane 2 fitting
+            n2 = plane2_opt[:3]
+            d2 = plane2_opt[3]
+            res2 = pts2 @ n2 + d2
+            fitting_loss += np.sum(res2**2)
+            
+            # Separation constraint penalty
+            actual_separation = abs(d2 - d1)
+            separation_error = abs(actual_separation - separation_distance)
+            separation_penalty = 1000 * separation_error**2
+            
+            # Orthogonality constraint penalty
+            orthogonality_error = abs(np.dot(n1, ref_normal))
+            orthogonality_penalty = 10000 * orthogonality_error**2
+            
+            # Parallelism constraint penalty (should be automatically satisfied)
+            parallelism_error = np.linalg.norm(n1 - n2)
+            parallelism_penalty = 10000 * parallelism_error**2
+            
+            # Total loss
+            total_loss = fitting_loss + separation_penalty + orthogonality_penalty + parallelism_penalty
+            
+            # Return fitness (higher is better)
+            return 1.0 / (1.0 + total_loss)
+            
+        except Exception as e:
+            print(f"Error in objective function: {e}")
+            return 1e-10
+    
+    # Create initial population
+    population_size = 40
+    initial_population = []
+    
+    for _ in range(population_size):
+        jittered = copy.deepcopy(initial_params)
+        # Small random perturbations
+        jittered[0] += np.random.normal(0, np.radians(2))  # theta
+        jittered[1] += np.random.normal(0, 1.0)  # dist1
+        jittered[2] += np.random.normal(0, 1.0)  # dist2
+        initial_population.append(jittered)
+    
+    # Ensure original solution is in population
+    initial_population[0] = initial_params
+    
+    # Run optimization
+    num_generations = 200
+    
+    print("[INFO] Running constrained optimization...")
+    
+    with tqdm(total=num_generations, desc="Optimization") as pbar:
+        ga_instance = pygad.GA(
+            num_generations=num_generations,
+            num_parents_mating=12,
+            fitness_func=objective_function,
+            sol_per_pop=len(initial_population),
+            num_genes=len(initial_params),
+            initial_population=initial_population,
+            gene_space=gene_space,
+            mutation_num_genes=1,
+            mutation_type="random",
+            mutation_by_replacement=True,
+            mutation_probability=0.08,
+            crossover_type="single_point",
+            parent_selection_type="tournament",
+            on_generation=lambda _: pbar.update(1),
+        )
+        
+        ga_instance.run()
+    
+    # Get results
+    solution, solution_fitness, _ = ga_instance.best_solution()
+    optimized_plane1, optimized_plane2 = create_optimized_planes(solution)
+    
+    print(f"\n[INFO] Optimization complete. Final fitness: {solution_fitness:.6f}")
+    
+    # Create output planes list
+    optimized_planes = planes_list.copy()
+    optimized_planes[plane_idx1] = optimized_plane1
+    optimized_planes[plane_idx2] = optimized_plane2
+    
+    # Verification and reporting
+    print("\n[INFO] Verification:")
+    
+    # Check parallelism
+    n1 = optimized_plane1[:3]
+    n2 = optimized_plane2[:3]
+    parallelism_error = np.linalg.norm(n1 - n2)
+    print(f"Parallelism error: {parallelism_error:.6f} (should be ~0)")
+    
+    # Check orthogonality
+    orthogonality_error = abs(np.dot(n1, ref_normal))
+    orthogonality_angle = np.degrees(np.arccos(np.clip(1.0 - orthogonality_error, 0, 1)))
+    print(f"Orthogonality error: {orthogonality_error:.6f} (should be ~0)")
+    print(f"Angle from 90°: {orthogonality_angle:.3f}°")
+    
+    # Check separation
+    actual_separation = abs(optimized_plane2[3] - optimized_plane1[3])
+    separation_error = abs(actual_separation - separation_distance)
+    print(f"Target separation: {separation_distance:.2f}mm")
+    print(f"Actual separation: {actual_separation:.2f}mm")
+    print(f"Separation error: {separation_error:.3f}mm")
+    
+    # Check fitting quality
+    print("\n[INFO] Fitting quality:")
+    
+    # Plane 1 fitting
+    res1 = pts1 @ n1 + optimized_plane1[3]
+    rmse1 = np.sqrt(np.mean(res1**2))
+    print(f"Plane {plane_idx1} RMSE: {rmse1:.3f}mm")
+    
+    # Plane 2 fitting
+    res2 = pts2 @ n2 + optimized_plane2[3]
+    rmse2 = np.sqrt(np.mean(res2**2))
+    print(f"Plane {plane_idx2} RMSE: {rmse2:.3f}mm")
+    
+    # Orientation changes
+    original_n1 = plane1[:3]
+    original_n2 = plane2[:3]
+    
+    angle_change1 = np.degrees(np.arccos(np.clip(abs(np.dot(original_n1, n1)), 0, 1)))
+    angle_change2 = np.degrees(np.arccos(np.clip(abs(np.dot(original_n2, n2)), 0, 1)))
+    
+    print(f"Plane {plane_idx1} orientation change: {angle_change1:.3f}°")
+    print(f"Plane {plane_idx2} orientation change: {angle_change2:.3f}°")
+    
+    # Create optimization info
+    optimization_info = {
+        'parallelism_error': parallelism_error,
+        'orthogonality_error': orthogonality_error,
+        'separation_error': separation_error,
+        'actual_separation': actual_separation,
+        'rmse1': rmse1,
+        'rmse2': rmse2,
+        'angle_change1': angle_change1,
+        'angle_change2': angle_change2,
+        'fitness': solution_fitness,
+        'optimized_indices': [plane_idx1, plane_idx2],
+        'reference_index': reference_plane_idx
+    }
+    
+    return optimized_planes, optimization_info
+    
+    
+    
 
 def optimize_all_planes_genetic(keep_planes, keep_inlier_clouds):
 
@@ -3661,82 +4336,7 @@ def separation_between_parallel_planes(plane1, plane2):
     # Return the absolute separation between the planes
     return abs(dist1 - dist2)
 
-# def create_cylinder_relative_to_planes(
-#     plane1, plane2,
-#     plane1_offset,
-#     plane2_offset,
-#     diameter, height
-# ):
-#     """
-#     Create a cylinder aligned with the intersection of two orthogonal planes.
-
-#     Parameters:
-#     - plane1, plane2: 4-element numpy arrays [a, b, c, d] for ax + by + cz + d = 0
-#     - plane1_offset, plane2_offset: Scalar distances (can be positive or negative)
-#     - diameter: Cylinder diameter
-#     - height: Cylinder height
-
-#     Returns:
-#     - trimesh.Trimesh cylinder mesh
-#     """
-
-#     def flip_if_major_negative(plane):
-#         normal = plane[:3]
-#         major_idx = np.argmax(np.abs(normal))
-#         if normal[major_idx] < 0:
-#             return np.concatenate([-normal, [-plane[3]]])
-#         return plane
-
-#     # Ensure normals face positive along their major axis
-#     plane1 = flip_if_major_negative(plane1)
-#     plane2 = flip_if_major_negative(plane2)
-
-#     # Extract normals
-#     n1 = plane1[:3]
-#     n2 = plane2[:3]
-
-#     # Axis of the cylinder = intersection line of planes
-#     axis_dir = np.cross(n1, n2)
-#     axis_dir /= np.linalg.norm(axis_dir)
-
-#     # Find a point on both planes (intersection point)
-#     A = np.vstack([n1, n2, axis_dir])
-#     b = -np.array([plane1[3], plane2[3], 0])
-#     intersection_point = np.linalg.lstsq(A, b, rcond=None)[0]
-
-#     # Offset from each plane along its normal
-#     offset_vector = n1 * plane1_offset + n2 * plane2_offset
-#     base_center = intersection_point + offset_vector - axis_dir * height / 2
-
-#     # Create default cylinder aligned with +Z
-#     cyl = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
-
-#     # Rotate to align Z axis with desired axis_dir
-#     z_axis = np.array([0, 0, 1])
-#     if np.allclose(axis_dir, z_axis):
-#         R = np.eye(3)
-#     elif np.allclose(axis_dir, -z_axis):
-#         R = -np.eye(3)
-#     else:
-#         rotation_axis = np.cross(z_axis, axis_dir)
-#         rotation_axis /= np.linalg.norm(rotation_axis)
-#         angle = np.arccos(np.clip(np.dot(z_axis, axis_dir), -1.0, 1.0))
-#         R = trimesh.transformations.rotation_matrix(angle, rotation_axis)[:3, :3]
-
-#     # Compose transform
-#     T = np.eye(4)
-#     T[:3, :3] = R
-#     T[:3, 3] = base_center
-#     cyl.apply_transform(T)
-
-#     # Translate further along the cylinder's axis
-#     T2 = np.eye(4)
-#     T2[:3, 3] = axis_dir * (height / 2)
-#     cyl.apply_transform(T2)
-
-#     return cyl
-
-def create_cylinder_relative_to_planes(
+def create_support_relative_to_planes(
     plane1, plane2,
     plane1_offset,
     plane2_offset,
@@ -3875,6 +4475,247 @@ def create_cylinder_relative_to_planes(
     
     return cyl
 
+def create_supports_relative_to_planes(
+    plane1, plane2, plane3,
+    support_offset, base_offset,
+    diameter, height
+):
+    """
+    Create two cylinders positioned relative to three planes.
+    The cylinders will be positioned such that:
+    - Both have axes parallel to the Y axis
+    - Both have the same Z coordinate, which is base_offset above plane3
+    - One cylinder is offset along +X from plane1 by support_offset
+    - The other cylinder is offset along -X from plane2 by support_offset
+    
+    Parameters:
+    - plane1, plane2: 4-element numpy arrays [a, b, c, d] for ax + by + cz + d = 0
+                      These should be parallel to each other and roughly aligned to X
+    - plane3: 4-element numpy array [a, b, c, d] for ax + by + cz + d = 0
+              This should be aligned with the Z axis
+    - support_offset: Distance to offset cylinders from plane1 (+X) and plane2 (-X)
+    - base_offset: Distance above plane3 to position the cylinders
+    - diameter: Cylinder diameter
+    - height: Cylinder height
+    
+    Returns:
+    - tuple: (cylinder1, cylinder2) - trimesh.Trimesh cylinder meshes
+    """
+    import numpy as np
+    import trimesh
+    
+    # Extract and normalize normals
+    n1 = plane1[:3] / np.linalg.norm(plane1[:3])
+    n2 = plane2[:3] / np.linalg.norm(plane2[:3])
+    n3 = plane3[:3] / np.linalg.norm(plane3[:3])
+    
+    # Find the Z coordinate for both cylinders (base_offset above plane3)
+    # For plane3 (Z-aligned): ax + by + cz + d = 0, so z = -(ax + by + d)/c
+    # We want the point that's base_offset above the plane
+    # Distance from point to plane is |ax + by + cz + d|/sqrt(a²+b²+c²)
+    # For a point at (x, y, z), distance to plane3 is |n3·[x,y,z] + plane3[3]|
+    
+    # We want: n3·[x,y,z] + plane3[3] = base_offset (assuming n3 points "up")
+    # So: z = (base_offset - plane3[3] - n3[0]*x - n3[1]*y) / n3[2]
+    
+    # For Z-aligned plane3, n3 should be approximately [0, 0, ±1]
+    # We'll determine the sign and calculate accordingly
+    
+    # Find reference Z coordinate at x=0, y=0
+    if abs(n3[2]) > 0.001:  # Plane3 is roughly Z-aligned
+        # Distance from origin to plane3
+        plane3_z_at_origin = -plane3[3] / n3[2]
+        # Adjust for the desired offset in the direction of the normal
+        cylinder_z = plane3_z_at_origin + base_offset * np.sign(n3[2])
+    else:
+        # Fallback if plane3 is not Z-aligned
+        cylinder_z = base_offset
+    
+    # Find X coordinates for the cylinders
+    # Cylinder 1: offset along +X from plane1 by support_offset
+    # Cylinder 2: offset along -X from plane2 by support_offset
+    
+    # For plane1, find where it intersects at y=0, z=cylinder_z
+    # plane1: n1[0]*x + n1[1]*y + n1[2]*z + plane1[3] = 0
+    # At y=0, z=cylinder_z: n1[0]*x + n1[2]*cylinder_z + plane1[3] = 0
+    if abs(n1[0]) > 0.001:
+        plane1_x_at_yz = -(n1[2] * cylinder_z + plane1[3]) / n1[0]
+        cylinder1_x = plane1_x_at_yz + support_offset  # Offset in +X direction
+    else:
+        # If plane1 is not X-aligned, use a different approach
+        cylinder1_x = support_offset
+    
+    # For plane2, find where it intersects at y=0, z=cylinder_z
+    if abs(n2[0]) > 0.001:
+        plane2_x_at_yz = -(n2[2] * cylinder_z + plane2[3]) / n2[0]
+        cylinder2_x = plane2_x_at_yz - support_offset  # Offset in -X direction
+    else:
+        # If plane2 is not X-aligned, use a different approach
+        cylinder2_x = -support_offset
+    
+    # Both cylinders have Y=0 as their center (you can adjust this if needed)
+    cylinder1_center = np.array([cylinder1_x, 0, cylinder_z])
+    cylinder2_center = np.array([cylinder2_x, 0, cylinder_z])
+    
+    # Create two cylinders aligned with Y axis
+    # Default cylinder is aligned with +Z, so we need to rotate 90 degrees around X
+    cyl1 = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
+    cyl2 = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
+    
+    # Rotation matrix to align Z axis with Y axis (90 degree rotation around X axis)
+    R = np.array([
+        [1, 0, 0],
+        [0, 0, -1],
+        [0, 1, 0]
+    ])
+    
+    # Apply rotation and translation to first cylinder
+    T1 = np.eye(4)
+    T1[:3, :3] = R
+    T1[:3, 3] = cylinder1_center
+    cyl1.apply_transform(T1)
+    
+    # Apply rotation and translation to second cylinder
+    T2 = np.eye(4)
+    T2[:3, :3] = R
+    T2[:3, 3] = cylinder2_center
+    cyl2.apply_transform(T2)
+    
+    return cyl1, cyl2
+
+def create_anvil_relative_to_planes(
+    plane1, plane2, plane3,
+    diameter, height, anvil_offset
+):
+    """
+    Create a cylinder positioned between two parallel planes.
+    The cylinder's geometric center will be positioned such that:
+    - It's centered between plane1 and plane2 (which should be parallel)
+    - Its axis is parallel to both plane1 and plane2
+    - Its axis is parallel to the XY plane
+    - Its center is at Y=0
+    - Its Z coordinate is anvil_offset above plane3
+    
+    Parameters:
+    - plane1, plane2: 4-element numpy arrays [a, b, c, d] for ax + by + cz + d = 0
+                      These should be parallel to each other and roughly aligned to X
+    - plane3: 4-element numpy array [a, b, c, d] for ax + by + cz + d = 0
+              This should be aligned with the Z axis
+    - diameter: Cylinder diameter
+    - height: Cylinder height
+    - anvil_offset: Height in Z above plane3 where cylinder center should be placed
+    
+    Returns:
+    - trimesh.Trimesh cylinder mesh
+    """
+    import numpy as np
+    import trimesh
+    
+    # Extract and normalize normals
+    n1 = plane1[:3] / np.linalg.norm(plane1[:3])
+    n2 = plane2[:3] / np.linalg.norm(plane2[:3])
+    n3 = plane3[:3] / np.linalg.norm(plane3[:3])
+    
+    # Verify that plane1 and plane2 are roughly parallel
+    # (dot product of normals should be close to ±1)
+    dot_product = np.dot(n1, n2)
+    if abs(abs(dot_product) - 1.0) > 0.1:  # Allow some tolerance
+        print(f"Warning: plane1 and plane2 may not be parallel (dot product: {dot_product})")
+    
+    # Find the Z coordinate for the cylinder center (anvil_offset above plane3)
+    # For plane3 (Z-aligned): ax + by + cz + d = 0
+    # Find the Z coordinate of plane3 at x=0, y=0
+    if abs(n3[2]) > 0.001:  # Plane3 is roughly Z-aligned
+        # Z coordinate where plane3 intersects at x=0, y=0
+        plane3_z_at_origin = -plane3[3] / n3[2]
+        # Cylinder Z coordinate is anvil_offset above this
+        cylinder_z = plane3_z_at_origin + anvil_offset
+    else:
+        # Fallback if plane3 is not Z-aligned
+        cylinder_z = anvil_offset
+    
+    # Find the midpoint between the two parallel planes at the desired Z level
+    # We need to find where each plane intersects the line at y=0, z=cylinder_z
+    
+    # Since planes are parallel, use the average normal (accounting for direction)
+    if dot_product < 0:
+        # Normals point in opposite directions, flip one
+        n2 = -n2
+        plane2_corrected = np.array([-plane2[0], -plane2[1], -plane2[2], -plane2[3]])
+    else:
+        plane2_corrected = plane2
+    
+    avg_normal = (n1 + n2) / 2
+    avg_normal = avg_normal / np.linalg.norm(avg_normal)
+    
+    # Find X coordinates where each plane intersects at y=0, z=cylinder_z
+    # plane1: n1[0]*x + n1[1]*y + n1[2]*z + plane1[3] = 0
+    # At y=0, z=cylinder_z: n1[0]*x + n1[2]*cylinder_z + plane1[3] = 0
+    if abs(n1[0]) > 0.001:
+        plane1_x_at_yz = -(n1[2] * cylinder_z + plane1[3]) / n1[0]
+    else:
+        plane1_x_at_yz = 0
+    
+    # plane2: n2[0]*x + n2[1]*y + n2[2]*z + plane2[3] = 0
+    # At y=0, z=cylinder_z: n2[0]*x + n2[2]*cylinder_z + plane2[3] = 0
+    if abs(n2[0]) > 0.001:
+        plane2_x_at_yz = -(n2[2] * cylinder_z + plane2[3]) / n2[0]
+    else:
+        plane2_x_at_yz = 0
+    
+    # Center X coordinate is midpoint between the two planes
+    center_x = (plane1_x_at_yz + plane2_x_at_yz) / 2
+    
+    # The cylinder axis should be perpendicular to the average normal
+    # and parallel to the XY plane (so Z component should be 0)
+    
+    # Since plane1 and plane2 are roughly X-aligned, their normals are roughly X-aligned
+    # The cylinder axis should be perpendicular to this, so roughly Y-aligned
+    # But we want it parallel to XY plane, so we'll use the Y direction
+    
+    # Find a direction perpendicular to avg_normal and parallel to XY plane
+    # Project avg_normal onto XY plane and rotate 90 degrees
+    avg_normal_xy = np.array([avg_normal[0], avg_normal[1], 0])
+    if np.linalg.norm(avg_normal_xy) > 0.1:
+        avg_normal_xy = avg_normal_xy / np.linalg.norm(avg_normal_xy)
+        # Rotate 90 degrees in XY plane: [x, y, 0] -> [-y, x, 0]
+        cylinder_axis = np.array([-avg_normal_xy[1], avg_normal_xy[0], 0])
+    else:
+        # If avg_normal is purely Z-aligned, use Y as cylinder axis
+        cylinder_axis = np.array([0, 1, 0])
+    
+    cylinder_axis = cylinder_axis / np.linalg.norm(cylinder_axis)
+    
+    # Set the cylinder center
+    cylinder_center = np.array([center_x, 0, cylinder_z])
+    
+    # Create default cylinder aligned with +Z
+    cyl = trimesh.creation.cylinder(radius=diameter / 2, height=height, sections=32)
+    
+    # Rotate to align Z axis with cylinder axis direction
+    z_axis = np.array([0, 0, 1])
+    if np.allclose(cylinder_axis, z_axis):
+        R = np.eye(3)
+    elif np.allclose(cylinder_axis, -z_axis):
+        R = -np.eye(3)
+    else:
+        rotation_axis = np.cross(z_axis, cylinder_axis)
+        rotation_axis_norm = np.linalg.norm(rotation_axis)
+        if rotation_axis_norm > 1e-6:
+            rotation_axis /= rotation_axis_norm
+            angle = np.arccos(np.clip(np.dot(z_axis, cylinder_axis), -1.0, 1.0))
+            R = trimesh.transformations.rotation_matrix(angle, rotation_axis)[:3, :3]
+        else:
+            R = np.eye(3)
+    
+    # Apply rotation and translation
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = cylinder_center
+    cyl.apply_transform(T)
+    
+    return cyl
+
 def trimesh_to_open3d(tri_mesh):
     """
     Convert a trimesh.Trimesh object to open3d.geometry.TriangleMesh.
@@ -3886,7 +4727,7 @@ def trimesh_to_open3d(tri_mesh):
     return o3d_mesh
 
 
-def align_planes_to_axes_minimal_v2(aligned_pcd, optimized_planes, planeX, planeZ):
+def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ):
     """
     Align planes to coordinate axes using truly minimal rotation.
     This version uses a more robust approach to avoid large rotations.
@@ -4008,6 +4849,11 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, optimized_planes, planeX, plane
     T[:3, :3] = R
     rotated_pcd = aligned_pcd.transform(T)
     
+    # Rotate keep_inlier_clouds
+    rotated_inlier_clouds = []
+    for cloud in keep_inlier_clouds:
+        rotated_inlier_clouds.append(cloud.transform(T))
+    
     # Apply rotation to all plane equations
     rotated_planes = []
     for plane in optimized_planes:
@@ -4040,7 +4886,7 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, optimized_planes, planeX, plane
     print(f"Euler angles (XYZ): {euler_angles}")
     print(f"Total rotation angle: {rotation_angle:.3f}°")
     
-    return rotated_pcd, rotated_planes, R, rotation_info
+    return rotated_pcd, rotated_inlier_clouds, rotated_planes, R, rotation_info
 
 
 def compute_optimal_rotation_procrustes(source_vectors, target_vectors):
@@ -4360,16 +5206,7 @@ def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
 
     return intersections
 
-def create_model(fixture_scan_path, specimen_scan_path, output_path):
-    # mesh_path = "E:/Fixture Scans/scan_1_with_specimen.stl"
-    # print("Loading mesh...")
-    # base_pcd = load_mesh_as_point_cloud(fixture_scan_path)
-    
-    # target_axes = [[0, 0, 1],
-    #                [1, 0, 0],
-    #                [np.sqrt(3)/2, 0, -0.5],
-    #                [-np.sqrt(3)/2, 0, -0.5]]
-    
+def create_model(fixture_scan_path, specimen_scan_path, output_path):    
     expected_planes = {
         0: (np.array([0, 0, 1]), 1),
         1: (np.array([1, 0, 0]), 4),
@@ -4384,9 +5221,10 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_pso(keep_planes, keep_inlier_clouds)
     # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic(keep_planes, keep_inlier_clouds)
-    optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic_v2_fixed(keep_planes, keep_inlier_clouds)
+    # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic_v2_fixed(keep_planes, keep_inlier_clouds)
     # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes_genetic_v2(keep_planes, keep_inlier_clouds)
     # optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_all_planes(keep_planes, keep_inlier_clouds)
+    optimized_planes, x_plane_indices, optimized_plane_meshes, keep_inlier_clouds = optimize_plane_orientations(keep_planes, keep_inlier_clouds)
     
     # Verification of constraints
     print("")
@@ -4437,8 +5275,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     planeZ = optimized_planes[planeZ_idx]
     
     # Perform alignment
-    rotated_pcd, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
-        aligned_pcd, optimized_planes, planeX, planeZ
+    rotated_pcd, rotated_inlier_clouds, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
+        aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ
     )
     
     # Validate results
@@ -4471,17 +5309,19 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     # === STEP 4: Rotate 90° about +X ===
     original_mesh.rotate(R_90X, center=(0, 0, 0))
+    pre_minimal_rotation_mesh = copy.deepcopy(original_mesh)
     
     # === STEP 5: Apply final minimal rotation matrix R ===
     original_mesh.rotate(R_planes, center=(0, 0, 0))
     
     # === RESULT ===
-    transformed_reference_mesh = original_mesh
+    transformed_reference_mesh = copy.deepcopy(original_mesh)
     
     o3d.visualization.draw_geometries([
         aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
         transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
-        axis], window_name="Transformed Reference Mesh")
+        pre_minimal_rotation_mesh.paint_uniform_color([0, 0, 1]),
+        axis], window_name="Transformed Reference Mesh (pre-minimal rotation is blue)")
 
     # Load and align matched specimen
     # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
@@ -4489,9 +5329,22 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
     
+    
+    # Perform anvil alignment adjustment here (require specific spacing and orthogonal to base)
+    plane_indices = [x_plane_indices[1],
+                     x_plane_indices[2],
+                     0]
+    planes_list = [rotated_planes[idx] for idx in plane_indices]
+    inlier_clouds_list = [rotated_inlier_clouds[idx] for idx in plane_indices]
+    
+    optimized_anvil_planes, optimization_info = optimize_anvil_planes(planes_list, inlier_clouds_list, plane_indices)
+    
+    
     #### Create mesh models of support and anvil cylinders
     diameter = 10
     height = 40
+    support_height_offset = 40
+    anvil_offset = 60
     
     base_plane = rotated_planes[0]
     base_support_offset = 52
@@ -4500,33 +5353,43 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     anvil_plane1 = rotated_planes[5]
     anvil_plane2 = rotated_planes[6]
-    anvil = create_cylinder_relative_to_planes(anvil_plane1,
+    anvil = create_anvil_relative_to_planes(anvil_plane1,
                                             anvil_plane2,
-                                            0,
-                                            0,
+                                            base_plane,
                                             diameter,
-                                            height)
+                                            height,
+                                            anvil_offset)
     anvil_mesh = trimesh_to_open3d(anvil)
     
     l_support_plane = rotated_planes[x_plane_indices[0]]
-    l_support_plane_offset = support_offset
-    l_support = create_cylinder_relative_to_planes(
-                    base_plane, l_support_plane,
-                    base_support_offset,
-                    l_support_plane_offset,
-                    diameter, height)
+    r_support_plane = rotated_planes[x_plane_indices[3]]
+    l_support, r_support = create_supports_relative_to_planes(
+                            l_support_plane, r_support_plane, base_plane,
+                            support_height_offset, base_support_offset,
+                            diameter, height)
     
     l_support_mesh = trimesh_to_open3d(l_support)
-    
-    r_support_plane = rotated_planes[x_plane_indices[3]]
-    r_support_plane_offset = -support_offset
-    r_support = create_cylinder_relative_to_planes(
-                    base_plane, r_support_plane,
-                    base_support_offset,
-                    r_support_plane_offset,
-                    diameter, height)
-    
     r_support_mesh = trimesh_to_open3d(r_support)
+    
+    # l_support_plane = rotated_planes[x_plane_indices[0]]
+    # l_support_plane_offset = support_offset
+    # l_support = create_support_relative_to_planes(
+    #                 base_plane, l_support_plane,
+    #                 base_support_offset,
+    #                 l_support_plane_offset,
+    #                 diameter, support_height)
+    
+    # l_support_mesh = trimesh_to_open3d(l_support)
+    
+    # r_support_plane = rotated_planes[x_plane_indices[3]]
+    # r_support_plane_offset = -support_offset
+    # r_support = create_support_relative_to_planes(
+    #                 base_plane, r_support_plane,
+    #                 base_support_offset,
+    #                 r_support_plane_offset,
+    #                 diameter, support_height)
+    
+    # r_support_mesh = trimesh_to_open3d(r_support)
     
     # Create coordinate frame
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=10.0, origin=[0,0,0])
