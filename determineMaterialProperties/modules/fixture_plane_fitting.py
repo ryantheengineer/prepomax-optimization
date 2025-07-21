@@ -250,6 +250,7 @@ def detect_planes_by_axis_clustering(pcd, expected_counts,
         final_inliers: dict of {axis_idx: list of Open3D point clouds}
     """
     remaining = pcd
+    remaining_indices = np.arange(len(pcd.points))  # Track original indices
     all_planes_with_inliers = []
 
     # Step 1: Run sequential RANSAC
@@ -257,20 +258,27 @@ def detect_planes_by_axis_clustering(pcd, expected_counts,
         model, inliers = fit_ransac_plane(np.asarray(remaining.points), distance_threshold, num_iterations=num_iterations)
         if model is None or len(inliers) < min_inliers:
             break
+        
         normal = np.array(model[:3])
         d = model[3]
-        all_planes_with_inliers.append((normal, d, inliers))
+        
+        # Map relative indices back to original indices
+        original_inliers = remaining_indices[inliers]
+        all_planes_with_inliers.append((normal, d, original_inliers))
+        
+        # Update remaining points and indices
         remaining = remaining.select_by_index(inliers, invert=True)
+        remaining_indices = remaining_indices[np.setdiff1d(np.arange(len(remaining_indices)), inliers)]
 
     # Step 2: Assign planes to closest axis clusters
     axis_plane_groups = {axis_idx: [] for axis_idx in expected_counts}
     angle_threshold_rad = np.radians(angle_threshold_deg)
 
-    for normal, d, inliers in all_planes_with_inliers:
+    for normal, d, original_inliers in all_planes_with_inliers:
         for axis_idx, (axis_vec, expected_count) in expected_counts.items():
             angle = angle_between_vectors(normal, axis_vec)
             if angle < angle_threshold_rad:
-                axis_plane_groups[axis_idx].append((normal, d, inliers))
+                axis_plane_groups[axis_idx].append((normal, d, original_inliers))
                 break  # Assign to first matching axis only
 
     # Step 3: Filter and verify counts
@@ -323,20 +331,6 @@ def detect_planes_by_axis_clustering(pcd, expected_counts,
 def create_model(fixture_scan_path, expected_planes, visualization=True):
     print(f'Loading {os.path.basename(fixture_scan_path)}...')
     pcd = load_mesh_as_point_cloud(fixture_scan_path)
-    
-    # expected_planes = {
-    #     0: (np.array([0, 0, 1]), 1),
-    #     1: (np.array([1, 0, 0]), 4),
-    #     2: (np.array([np.sqrt(3)/2, 0, -0.5]), 1),
-    #     3: (np.array([-np.sqrt(3)/2, 0, -0.5]), 1)
-    # }
-    
-    # expected_planes = {
-    #     0: (np.array([1, 0, 0]), 4),
-    #     1: (np.array([0, 0, 1]), 1),
-    #     2: (np.array([np.sqrt(3)/2, 0, -0.5]), 1),
-    #     3: (np.array([-np.sqrt(3)/2, 0, -0.5]), 1)
-    # }
     
     print('Reorienting point cloud...')
     aligned_pcd, R_pca, R_90X, R_flip, centroid = prepare_scan_orientation(pcd, is_point_cloud=True)
