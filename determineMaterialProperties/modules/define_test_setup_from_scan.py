@@ -4,14 +4,13 @@ from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
 from itertools import combinations
 import trimesh
-from align_meshes import align_tgt_to_ref_meshes, load_mesh
+from align_meshes import align_tgt_to_ref_meshes, load_mesh, print_verbose
 import copy
 from scipy.spatial import cKDTree
 import pandas as pd
 import os
 import fixture_plane_fitting
-import pygad
-from tqdm import tqdm
+import time
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
     # Create a square plane oriented by the plane normal
@@ -102,7 +101,7 @@ def angle_between_plane_normals(plane1, plane2):
     angle_rad = np.arccos(np.clip(np.abs(np.dot(n1, n2)), 0.0, 1.0))
     return np.degrees(angle_rad)
 
-def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tolerance=1e-6):
+def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tolerance=1e-6, verbose=False):
     """
     Optimize plane orientations to satisfy geometric constraints while minimizing fitting error.
     
@@ -172,8 +171,8 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     # Set up optimization bounds (limit rotations to reasonable range)
     bounds = [(-bound_factor*max_deviation_rad, bound_factor*max_deviation_rad)] * 6  # 2 rotation params × 3 planes
     
-    print(f"\n\nInitial angles: {angle_01:.2f}°, {angle_02:.2f}°, {angle_12:.2f}°")
-    print(f"Max deviation: {max_deviation:.2f}°, Constraint tolerance: {constraint_tolerance:.2f}°")
+    print_verbose(f"\n\nInitial angles: {angle_01:.2f}°, {angle_02:.2f}°, {angle_12:.2f}°", verbose)
+    print_verbose(f"Max deviation: {max_deviation:.2f}°, Constraint tolerance: {constraint_tolerance:.2f}°", verbose)
     
     def rodrigues_rotation(axis, angle):
         """Apply Rodrigues' rotation formula"""
@@ -265,7 +264,7 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     x0 = np.zeros(6)
     
     # Run optimization
-    print("Running constrained optimization...")
+    print_verbose("Running constrained optimization...", verbose)
     result = minimize(
         objective_function,
         x0,
@@ -275,7 +274,7 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     )
     
     if not result.success:
-        print(f"Warning: Optimization did not converge. Message: {result.message}")
+        print_verbose(f"Warning: Optimization did not converge. Message: {result.message}", verbose)
     
     # Extract final results
     final_normals = get_perturbed_normals(result.x)
@@ -311,9 +310,9 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
         'rotation_params': result.x
     }
     
-    print(f"Final angles: {final_angle_01:.2f}°, {final_angle_02:.2f}°, {final_angle_12:.2f}°")
-    print(f"Applied rotations: {rotation_magnitudes[0]:.3f}°, {rotation_magnitudes[1]:.3f}°, {rotation_magnitudes[2]:.3f}°")
-    print(f"Final objective value: {result.fun:.6f}")
+    print_verbose(f"Final angles: {final_angle_01:.2f}°, {final_angle_02:.2f}°, {final_angle_12:.2f}°", verbose)
+    print_verbose(f"Applied rotations: {rotation_magnitudes[0]:.3f}°, {rotation_magnitudes[1]:.3f}°, {rotation_magnitudes[2]:.3f}°", verbose)
+    print_verbose(f"Final objective value: {result.fun:.6f}", verbose)
     
     # Insert the elements of keep_planes that were not included in the optimization, in their original positions
     optimized_planes.append(planes[x_plane_indices[1]])
@@ -321,7 +320,7 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     optimized_planes.append(planes[5])
     optimized_planes.append(planes[6])
     
-    print("\n[INFO] Orientation changes:")
+    print_verbose("\n[INFO] Orientation changes:", verbose)
     for i, (original, optimized) in enumerate(zip(planes, optimized_planes)):
         orig_normal = original[:3]
         opt_normal = optimized[:3]
@@ -329,10 +328,10 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
         cos_angle = np.clip(np.dot(orig_normal, opt_normal), -1, 1)
         angle_change = np.degrees(np.arccos(abs(cos_angle)))
         
-        print(f"Plane {i}: {angle_change:.3f}° change")
+        print_verbose(f"Plane {i}: {angle_change:.3f}° change", verbose)
     
     # # Verify anvil angles
-    # print("\n[INFO] Anvil plane angle verification:")
+    # print_verbose("\n[INFO] Anvil plane angle verification:")
     # current_base_normal = optimized_planes[0][:3]
     
     # Create plane meshes
@@ -344,7 +343,7 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     # return optimized_planes, optimization_results
     return optimized_planes, optimization_results, x_plane_indices, optimized_plane_meshes
 
-def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance=1e-6):
+def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance=1e-6, verbose=False):
     # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
     idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(planes[1:5])
     x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
@@ -391,8 +390,8 @@ def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance
     # Set up optimization bounds (limit rotations to reasonable range)
     bounds = [(-bound_factor*max_deviation_rad, bound_factor*max_deviation_rad)] * 4  # 2 rotation params × 2 planes
     
-    print(f"\n\nInitial angles: {angle_01:.2f}°, {angle_02:.2f}°, {angle_12:.2f}°")
-    print(f"Max deviation: {max_deviation:.2f}°, Constraint tolerance: {constraint_tolerance:.2f}°")
+    print_verbose(f"\n\nInitial angles: {angle_01:.2f}°, {angle_02:.2f}°, {angle_12:.2f}°", verbose)
+    print_verbose(f"Max deviation: {max_deviation:.2f}°, Constraint tolerance: {constraint_tolerance:.2f}°", verbose)
     
     def rodrigues_rotation(axis, angle):
         """Apply Rodrigues' rotation formula"""
@@ -488,7 +487,7 @@ def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance
     x0 = np.zeros(4)
     
     # Run optimization
-    print("Running constrained optimization...")
+    print_verbose("Running constrained optimization...", verbose)
     result = minimize(
         objective_function,
         x0,
@@ -498,7 +497,7 @@ def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance
     )
     
     if not result.success:
-        print(f"Warning: Optimization did not converge. Message: {result.message}")
+        print_verbose(f"Warning: Optimization did not converge. Message: {result.message}", verbose)
         
     # Extract final results
     final_normals = get_perturbed_normals(result.x)
@@ -534,9 +533,9 @@ def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance
         'rotation_params': result.x
     }
         
-    print(f"Final angles: {final_angle_01:.2f}°, {final_angle_02:.2f}°, {final_angle_12:.2f}°")
-    print(f"Applied rotations: {rotation_magnitudes[0]:.3f}°, {rotation_magnitudes[1]:.3f}°, {rotation_magnitudes[2]:.3f}°")
-    print(f"Final objective value: {result.fun:.6f}")
+    print_verbose(f"Final angles: {final_angle_01:.2f}°, {final_angle_02:.2f}°, {final_angle_12:.2f}°", verbose)
+    print_verbose(f"Applied rotations: {rotation_magnitudes[0]:.3f}°, {rotation_magnitudes[1]:.3f}°, {rotation_magnitudes[2]:.3f}°", verbose)
+    print_verbose(f"Final objective value: {result.fun:.6f}", verbose)
     
     # Extract final results
     final_normals = get_perturbed_normals(result.x)
@@ -552,270 +551,6 @@ def optimize_anvil_planes(planes, clouds, bound_factor=2.0, constraint_tolerance
     optimized_planes.append(planes[6])
         
     return optimized_planes, optimization_results
-
-
-def optimize_anvil_planes_v2(planes_list, inlier_clouds_list):
-    """
-    Optimize orientations of only the base and support planes, and orient the
-    point cloud based on that.
-    """
-    
-    # Get original planes
-    inner_plane1 = planes_list[0]
-    inner_plane2 = planes_list[1]
-    base_plane = planes_list[2]
-    
-    def angle_between_plane_and_axis(plane, axis):
-        """
-        plane: array-like of 4 values [a, b, c, d] defining plane ax + by + cz + d = 0
-        axis: array-like of 3 values [x, y, z] representing axis direction
-    
-        Returns angle in degrees between the plane's normal and the axis.
-        """
-        normal = np.array(plane[:3])
-        axis = np.array(axis)
-        normal = normal / np.linalg.norm(normal)
-        axis = axis / np.linalg.norm(axis)
-        angle_rad = np.arccos(np.clip(np.abs(np.dot(normal, axis)), 0.0, 1.0))
-        return np.degrees(angle_rad)
-    
-    def angle_between_plane_normals(plane1, plane2):
-        """
-        plane1, plane2: array-like of 4 values each [a, b, c, d]
-        
-        Returns angle in degrees between the two plane normals.
-        """
-        n1 = np.array(plane1[:3])
-        n2 = np.array(plane2[:3])
-        n1 = n1 / np.linalg.norm(n1)
-        n2 = n2 / np.linalg.norm(n2)
-        angle_rad = np.arccos(np.clip(np.abs(np.dot(n1, n2)), 0.0, 1.0))
-        return np.degrees(angle_rad)
-    
-    # Quick check for relative angles of elements of keep_planes
-    base_plane_angle_Z = angle_between_plane_and_axis(base_plane, [0, 0, 1])
-    inner_plane1_angle_X = angle_between_plane_and_axis(inner_plane1, [1, 0, 0])
-    inner_plane2_angle_X = angle_between_plane_and_axis(inner_plane2, [1, 0, 0])
-    print('\nAngles between detected ANVIL planes and axes:')
-    print(f'Base Plane to Z:\t{base_plane_angle_Z:.3f} degrees')
-    print(f'inner Plane 1 to X:\t{inner_plane1_angle_X:.3f} degrees')
-    print(f'inner Plane 2 to X:\t{inner_plane2_angle_X:.3f} degrees')
-    
-    base_inner_1 = angle_between_plane_normals(base_plane, inner_plane1)
-    base_inner_2 = angle_between_plane_normals(base_plane, inner_plane2)
-    inner_1_2 = angle_between_plane_normals(inner_plane1, inner_plane2)
-    print(f'\nAngle between base plane and inner 1:\t{base_inner_1:.3f}')
-    print(f'Angle between base plane and inner 2:\t{base_inner_2:.3f}')
-    print(f'Angle between inner 1 and inner 2:\t{inner_1_2:.3f}')
-    
-    # Create consistent copies without flipping - preserve original orientations
-    planes = [copy.deepcopy(base_plane),
-              copy.deepcopy(inner_plane1),
-              copy.deepcopy(inner_plane2)]
-    
-    # Ensure all planes have unit normals
-    for i, plane in enumerate(planes):
-        normal = plane[:3]
-        norm_mag = np.linalg.norm(normal)
-        if norm_mag > 1e-10:
-            planes[i] = np.array([normal[0]/norm_mag, normal[1]/norm_mag, 
-                                 normal[2]/norm_mag, plane[3]/norm_mag])
-    
-    # Extract reference orientations and distances
-    base_normal = planes[0][:3]
-    base_distance = abs(planes[0][3])
-    
-    inner1_normal = planes[1][:3]
-    inner1_distance = abs(planes[1][3])
-    
-    # inner2_normal = planes[2][:3]
-    inner2_distance = abs(planes[2][3])
-    
-    # Set up optimization parameters with tighter bounds
-    d_tol = 5.0  # Reduced from 10.0
-    angle_tol = np.radians(1.0)  # Reduced to 1.0 degrees for tighter control
-    
-    # Parameters: [base_nx, base_ny, base_nz, base_d, inner1_d, inner2_d, inner1_d, anvil1_d, anvil2_d]
-    # We'll optimize the normal directly instead of spherical coordinates
-    initial_params = [
-        base_normal[0], base_normal[1], base_normal[2], base_distance,
-        inner1_distance, inner2_distance
-    ]
-    
-    # Create bounds that constrain changes to small adjustments
-    normal_tol = 0.05  # Reduced from 0.1 for tighter control
-    gene_space = [
-        {'low': base_normal[0] - normal_tol, 'high': base_normal[0] + normal_tol},  # base_nx
-        {'low': base_normal[1] - normal_tol, 'high': base_normal[1] + normal_tol},  # base_ny
-        {'low': base_normal[2] - normal_tol, 'high': base_normal[2] + normal_tol},  # base_nz
-        {'low': max(0.1, base_distance - d_tol), 'high': base_distance + d_tol},   # base_d
-        {'low': max(0.1, inner1_distance - d_tol), 'high': inner1_distance + d_tol}, # inner1_d
-        {'low': max(0.1, inner2_distance - d_tol), 'high': inner2_distance + d_tol}, # inner2_d
-    ]
-    
-    def rodrigues_rotation(vector, axis, angle):
-        """Apply Rodrigues' rotation formula to rotate vector around axis by angle."""
-        axis = axis / np.linalg.norm(axis)
-        cos_angle = np.cos(angle)
-        sin_angle = np.sin(angle)
-        
-        rotated = (vector * cos_angle + 
-                  np.cross(axis, vector) * sin_angle + 
-                  axis * np.dot(axis, vector) * (1 - cos_angle))
-        
-        return rotated / np.linalg.norm(rotated)
-    
-    def create_planes_from_params_fixed(params):
-        """
-        Create plane definitions from parameter values while preserving orientations
-        and enforcing exact relative angles.
-        """
-        # Extract parameters
-        base_nx, base_ny, base_nz, base_d = params[:4]
-        inner1_d, inner2_d = params[4:]
-        
-        # Normalize base normal
-        base_normal = np.array([base_nx, base_ny, base_nz])
-        base_normal = base_normal / np.linalg.norm(base_normal)
-        
-        # Create base plane
-        base_plane = np.array([base_normal[0], base_normal[1], base_normal[2], -base_d])
-        
-        # Calculate orthogonal directions in the original coordinate system
-        # Project original normals onto plane perpendicular to base normal
-        def project_to_perpendicular_plane(vector, normal):
-            """Project vector onto plane perpendicular to normal."""
-            projected = vector - np.dot(vector, normal) * normal
-            return projected / np.linalg.norm(projected)
-        
-        # Get original orthogonal directions by projecting original normals
-        base_to_inner1 = project_to_perpendicular_plane(inner1_normal, base_normal)
-        # base_to_inner1 = project_to_perpendicular_plane(inner1_normal, base_normal)
-        
-        # Create inner planes (preserve original direction relative to base)
-        inner_plane1 = np.array([base_to_inner1[0], base_to_inner1[1], base_to_inner1[2], -inner1_d])
-        inner_plane2 = np.array([base_to_inner1[0], base_to_inner1[1], base_to_inner1[2], -inner2_d])
-        
-        return [base_plane, inner_plane1, inner_plane2]
-    
-    def objective_fixed(ga_instance, solution, solution_idx):
-        """
-        Objective function that penalizes large orientation changes and enforces
-        exact relative angles for anvil planes.
-        """
-        try:
-            optimized_planes = create_planes_from_params_fixed(solution)
-            
-            # Calculate fitting error
-            fitting_loss = 0.0
-            for i, plane in enumerate(optimized_planes):
-                n = plane[:3]
-                n = n / np.linalg.norm(n)
-                d = plane[3]
-                pts = np.asarray(inlier_clouds_list[i].points)
-                res = pts @ n + d
-                fitting_loss += np.sum(res**2)
-            
-            # Add penalty for large orientation changes (except anvil planes)
-            orientation_penalty = 0.0
-            
-            # Check first 5 planes (base, outer, inner)
-            for i in range(len(optimized_planes)):
-                original_normal = planes[i][:3]
-                optimized_normal = optimized_planes[i][:3]
-                
-                # Calculate angle between normals
-                cos_angle = np.clip(np.dot(original_normal, optimized_normal), -1, 1)
-                angle_change = np.arccos(abs(cos_angle))
-                
-                # Penalize large changes
-                if angle_change > angle_tol:
-                    orientation_penalty += 1000 * (angle_change - angle_tol)**2
-            
-            # # Verify anvil planes maintain exact relative angles
-            # # anvil_angle_penalty = 0.0
-            # current_base_normal = optimized_planes[0][:3]
-            
-            # Combined objective (maximize)
-            total_loss = fitting_loss + orientation_penalty
-            
-            # Return fitness (higher is better)
-            return 1.0 / (1.0 + total_loss)
-            
-        except Exception as e:
-            print(f"Error in objective function: {e}")
-            return 1e-10  # Very low fitness for invalid solutions
-    
-    # Create initial population with smaller perturbations
-    initial_population = []
-    npop = 150
-    for _ in range(npop):  # Smaller population
-        jittered = copy.deepcopy(initial_params)
-        # Much smaller jittering to avoid Y-axis rotation
-        jittered += np.random.normal(0, 0.1, size=len(jittered))  # Reduced from 0.02
-        initial_population.append(jittered)
-    
-    # Add the original solution to the population
-    initial_population[0] = initial_params
-    
-    print("[INFO] Running Fixed Genetic Algorithm...")
-    num_generations = 500  # Increased for better convergence
-    
-    with tqdm(total=num_generations) as pbar:
-        ga_instance = pygad.GA(
-            num_generations=num_generations,
-            num_parents_mating=30,  # Increased for better diversity
-            fitness_func=objective_fixed,
-            sol_per_pop=len(initial_population),
-            num_genes=len(initial_params),
-            initial_population=initial_population,
-            gene_space=gene_space,
-            mutation_num_genes=1,  # Reduced mutation to single gene
-            mutation_type="random",
-            mutation_by_replacement=True,
-            mutation_probability=0.05,  # Lower mutation probability
-            crossover_type="single_point",
-            parent_selection_type="tournament",
-            on_generation=lambda _: pbar.update(1),
-        )
-        
-        ga_instance.run()
-    
-    # Get results
-    solution, solution_fitness, _ = ga_instance.best_solution()
-    print(f"\n[INFO] Optimization complete. Final fitness: {solution_fitness}")
-    
-    ga_instance.plot_fitness("Outer planes and base alignment")
-    
-    # Analyze the changes
-    solution_planes = create_planes_from_params_fixed(solution)
-    
-    # Insert the elements of keep_planes that were not included in the optimization, in their original positions
-    optimized_planes = [solution_planes[0],
-                        solution_planes[1],
-                        solution_planes[2]]
-    
-    print("\n[INFO] Orientation changes:")
-    for i, (original, optimized) in enumerate(zip(planes, optimized_planes)):
-        orig_normal = original[:3]
-        opt_normal = optimized[:3]
-        
-        cos_angle = np.clip(np.dot(orig_normal, opt_normal), -1, 1)
-        angle_change = np.degrees(np.arccos(abs(cos_angle)))
-        
-        print(f"Plane {i}: {angle_change:.3f}° change")
-    
-    # # Verify anvil angles
-    # print("\n[INFO] Anvil plane angle verification:")
-    # current_base_normal = optimized_planes[0][:3]
-    
-    # Create plane meshes
-    optimized_plane_meshes = []
-    for plane, cloud in zip(optimized_planes, inlier_clouds_list):
-        mesh = create_plane_mesh(plane, cloud, plane_size=50.0)
-        optimized_plane_meshes.append(mesh)
-    
-    return optimized_planes
 
 def separation_between_parallel_planes(plane1, plane2):
     """
@@ -1089,7 +824,7 @@ def trimesh_to_open3d(tri_mesh):
     return o3d_mesh
 
 
-def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ):
+def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ, verbose=False):
     """
     Align planes to coordinate axes using truly minimal rotation.
     This version uses a more robust approach to avoid large rotations.
@@ -1111,8 +846,8 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_p
     normalX = planeX[:3] / np.linalg.norm(planeX[:3])
     normalZ = planeZ[:3] / np.linalg.norm(planeZ[:3])
     
-    print(f"Original normalX: {normalX}")
-    print(f"Original normalZ: {normalZ}")
+    print_verbose(f"Original normalX: {normalX}", verbose)
+    print_verbose(f"Original normalZ: {normalZ}", verbose)
     
     # Target axes - we'll determine the best direction more carefully
     target_X_pos = np.array([1, 0, 0])
@@ -1137,27 +872,27 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_p
     best_option = None
     min_total_angle = float('inf')
     
-    print("\nEvaluating alignment options:")
+    print_verbose("\nEvaluating alignment options:", verbose)
     for target_X, target_Z, label in options:
         angle_X = rotation_angle_between_vectors(normalX, target_X)
         angle_Z = rotation_angle_between_vectors(normalZ, target_Z)
         total_angle = angle_X + angle_Z
         
-        print(f"{label}: X angle = {np.degrees(angle_X):.3f}°, Z angle = {np.degrees(angle_Z):.3f}°, Total = {np.degrees(total_angle):.3f}°")
+        print_verbose(f"{label}: X angle = {np.degrees(angle_X):.3f}°, Z angle = {np.degrees(angle_Z):.3f}°, Total = {np.degrees(total_angle):.3f}°", verbose)
         
         if total_angle < min_total_angle:
             min_total_angle = total_angle
             best_option = (target_X, target_Z, label, angle_X, angle_Z)
     
     final_X, final_Z, best_label, best_angle_X, best_angle_Z = best_option
-    print(f"\nSelected option: {best_label}")
-    print(f"Target X direction: {final_X}")
-    print(f"Target Z direction: {final_Z}")
+    print_verbose(f"\nSelected option: {best_label}", verbose)
+    print_verbose(f"Target X direction: {final_X}", verbose)
+    print_verbose(f"Target Z direction: {final_Z}", verbose)
     
     # Check orthogonality of target directions
     orthogonality_check = abs(np.dot(final_X, final_Z))
     if orthogonality_check > 1e-10:
-        print(f"Warning: Target directions not orthogonal! Dot product: {orthogonality_check}")
+        print_verbose(f"Warning: Target directions not orthogonal! Dot product: {orthogonality_check}", verbose)
     
     # Now compute the actual minimal rotation
     # We'll use a different approach: find the rotation that simultaneously
@@ -1176,16 +911,16 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_p
     # Alternative method if Procrustes doesn't work well:
     # Use two sequential minimal rotations
     if np.linalg.det(R) < 0.9 or np.linalg.norm(R @ R.T - np.eye(3)) > 1e-6:
-        print("Procrustes method failed, using sequential rotations")
+        print_verbose("Procrustes method failed, using sequential rotations", verbose)
         R = compute_sequential_minimal_rotation(normalX, normalZ, final_X, final_Z)
     
     # Verify the rotation
     final_normalX = R @ normalX
     final_normalZ = R @ normalZ
     
-    print("\nAfter rotation:")
-    print(f"Final normalX: {final_normalX}")
-    print(f"Final normalZ: {final_normalZ}")
+    print_verbose("\nAfter rotation:", verbose)
+    print_verbose(f"Final normalX: {final_normalX}", verbose)
+    print_verbose(f"Final normalZ: {final_normalZ}", verbose)
     
     # Check alignment quality
     alignment_X = abs(np.dot(final_normalX, final_X))
@@ -1194,17 +929,17 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_p
     angle_error_X = np.degrees(np.arccos(np.clip(alignment_X, 0, 1)))
     angle_error_Z = np.degrees(np.arccos(np.clip(alignment_Z, 0, 1)))
     
-    print(f"X alignment: {alignment_X:.6f} (error: {angle_error_X:.6f}°)")
-    print(f"Z alignment: {alignment_Z:.6f} (error: {angle_error_Z:.6f}°)")
+    print_verbose(f"X alignment: {alignment_X:.6f} (error: {angle_error_X:.6f}°)", verbose)
+    print_verbose(f"Z alignment: {alignment_Z:.6f} (error: {angle_error_Z:.6f}°)", verbose)
     
     # Verify rotation matrix properties
     det_R = np.linalg.det(R)
     orthogonality_error = np.linalg.norm(R @ R.T - np.eye(3))
     
     if abs(det_R - 1.0) > 1e-10:
-        print(f"Warning: Rotation matrix determinant = {det_R}, should be 1.0")
+        print_verbose(f"Warning: Rotation matrix determinant = {det_R}, should be 1.0", verbose)
     if orthogonality_error > 1e-10:
-        print(f"Warning: Rotation matrix orthogonality error = {orthogonality_error}")
+        print_verbose(f"Warning: Rotation matrix orthogonality error = {orthogonality_error}", verbose)
     
     # Create transformation matrix and apply
     T = np.eye(4)
@@ -1244,9 +979,9 @@ def align_planes_to_axes_minimal_v2(aligned_pcd, keep_inlier_clouds, optimized_p
         'best_option': best_label
     }
     
-    print("\nRotation summary:")
-    print(f"Euler angles (XYZ): {euler_angles}")
-    print(f"Total rotation angle: {rotation_angle:.3f}°")
+    print_verbose("\nRotation summary:", verbose)
+    print_verbose(f"Euler angles (XYZ): {euler_angles}", verbose)
+    print_verbose(f"Total rotation angle: {rotation_angle:.3f}°", verbose)
     
     return rotated_pcd, rotated_inlier_clouds, rotated_planes, R, rotation_info
 
@@ -1376,11 +1111,11 @@ def rodrigues_rotation(axis, angle):
     
     return R
 
-def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, planeZ_idx, rotation_matrix):
+def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, planeZ_idx, rotation_matrix, verbose=False):
     """
     Validate that the minimal rotation alignment worked correctly.
     """
-    print("\n=== MINIMAL ROTATION VALIDATION ===")
+    print_verbose("\n=== MINIMAL ROTATION VALIDATION ===", verbose)
     
     # Check the target planes
     # planeX_original = original_planes[planeX_idx]
@@ -1412,16 +1147,16 @@ def validate_minimal_rotation(original_planes, rotated_planes, planeX_idx, plane
     angle_error_X = np.arccos(np.clip(best_X_alignment, 0, 1)) * 180 / np.pi
     angle_error_Z = np.arccos(np.clip(best_Z_alignment, 0, 1)) * 180 / np.pi
     
-    print(f"PlaneX alignment with X-axis: {best_X_alignment:.6f} (error: {angle_error_X:.6f}°)")
-    print(f"PlaneZ alignment with Z-axis: {best_Z_alignment:.6f} (error: {angle_error_Z:.6f}°)")
+    print_verbose(f"PlaneX alignment with X-axis: {best_X_alignment:.6f} (error: {angle_error_X:.6f}°)", verbose)
+    print_verbose(f"PlaneZ alignment with Z-axis: {best_Z_alignment:.6f} (error: {angle_error_Z:.6f}°)", verbose)
     
     # Check total rotation angle
     rotation_scipy = Rotation.from_matrix(rotation_matrix)
     total_angle = np.linalg.norm(rotation_scipy.as_rotvec()) * 180 / np.pi
-    print(f"Total rotation angle: {total_angle:.3f}°")
+    print_verbose(f"Total rotation angle: {total_angle:.3f}°", verbose)
     
     success = angle_error_X < 0.1 and angle_error_Z < 0.1
-    print(f"Alignment successful: {success}\n\n")
+    print_verbose(f"Alignment successful: {success}\n\n", verbose)
     
     return success, angle_error_X, angle_error_Z, total_angle
 
@@ -1461,20 +1196,20 @@ def identify_mesh_type(obj):
     else:
         return 'unknown'
 
-def ensure_normals_outward(mesh: trimesh.Trimesh, mesh_name=""):
+def ensure_normals_outward(mesh: trimesh.Trimesh, mesh_name="", verbose=False):
     mesh_type = identify_mesh_type(mesh)
     if mesh_type=='open3d':
         mesh = o3d_to_trimesh(mesh)
     
     if not mesh.is_watertight:
-        print(f"Warning: Mesh '{mesh_name}' is not watertight. Normal orientation may be unreliable.")
+        print_verbose(f"Warning: Mesh '{mesh_name}' is not watertight. Normal orientation may be unreliable.", verbose)
     
     # Attempt to fix normals
     mesh.fix_normals()
 
     # Optional check
     if not mesh.is_winding_consistent:
-        print(f"Warning: Mesh '{mesh_name}' has inconsistent winding after fixing normals.")
+        print_verbose(f"Warning: Mesh '{mesh_name}' has inconsistent winding after fixing normals.", verbose)
 
     return mesh
 
@@ -1507,7 +1242,7 @@ def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
 
     return intersections
 
-def create_model(fixture_scan_path, specimen_scan_path, output_path):    
+def create_model(fixture_scan_path, specimen_scan_path, output_path, visualization=False, verbose=False):    
     expected_planes = {
         0: (np.array([0, 0, 1]), 1),
         1: (np.array([1, 0, 0]), 4),
@@ -1515,16 +1250,27 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
         3: (np.array([-np.sqrt(3)/2, 0, -0.5]), 1)
     }
     
-    keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = fixture_plane_fitting.create_model(fixture_scan_path, expected_planes, visualization=True)
+    max_retries = 5
+    retry_delay_seconds = 2
+    attempts = 0
     
-    optimized_planes, optimization_results, x_plane_indices, optimized_plane_meshes = optimize_constrained_planes(keep_planes, keep_inlier_clouds)
+    while attempts < max_retries:
+        try:
+            keep_planes, keep_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid = fixture_plane_fitting.create_model(fixture_scan_path, expected_planes, visualization=visualization, verbose=verbose)
+            break
+        except:
+            attempts += 1
+            print_verbose(f"Attempt {attempts} failed.", verbose)
+            time.sleep(retry_delay_seconds)
+    
+    optimized_planes, optimization_results, x_plane_indices, optimized_plane_meshes = optimize_constrained_planes(keep_planes, keep_inlier_clouds, verbose=verbose)
     
     for i, (original, optimized) in enumerate(zip(keep_planes, optimized_planes)):
-        print(f'\nPlane {i}:')
-        print(f'Angle Change: {angle_between_plane_normals(original, optimized)} deg')
+        print_verbose(f'\nPlane {i}:', verbose)
+        print_verbose(f'Angle Change: {angle_between_plane_normals(original, optimized)} deg', verbose)
     
     # Verification of constraints
-    print("")
+    print_verbose("", verbose)
     for combo in combinations(range(len(optimized_planes)), 2):
         n1 = optimized_planes[combo[0]][:3]
         n2 = optimized_planes[combo[1]][:3]
@@ -1551,18 +1297,18 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
                 raise ValueError("Index out of range")
             
         if len(common_elements) == 2:
-            print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} ({labels[1]}) are separated by {angle_diff:.4f} degrees')
+            print_verbose(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} ({labels[1]}) are separated by {angle_diff:.4f} degrees', verbose)
         elif len(common_elements) == 1:
             if combo[0] in common_elements:
-                print(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} are separated by {angle_diff:.4f} degrees')
+                print_verbose(f'Planes {combo[0]} ({labels[0]}) and {combo[1]} are separated by {angle_diff:.4f} degrees', verbose)
             else:
-                print(f'Planes {combo[0]} and {combo[1]} ({labels[0]}) are separated by {angle_diff:.4f} degrees')                
+                print_verbose(f'Planes {combo[0]} and {combo[1]} ({labels[0]}) are separated by {angle_diff:.4f} degrees', verbose)                
         else:
-            print(f'Planes {combo[0]} and {combo[1]} are separated by {angle_diff:.4f} degrees')
+            print_verbose(f'Planes {combo[0]} and {combo[1]} are separated by {angle_diff:.4f} degrees', verbose)
         
         if np.abs(np.around(angle_diff,2)) <= 0.01:
             separation_dist = separation_between_parallel_planes(optimized_planes[combo[0]], optimized_planes[combo[1]])
-            print(f'\tPlanes {combo[0]} and {combo[1]} are separated by a distance of {separation_dist}')
+            print_verbose(f'\tPlanes {combo[0]} and {combo[1]} are separated by a distance of {separation_dist}', verbose)
     
     # Re-align everything so the support planes and base plane define the world orientation
     planeX_idx = x_plane_indices[0]
@@ -1572,22 +1318,22 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     # Perform alignment
     rotated_pcd, rotated_inlier_clouds, rotated_planes, R_planes, info = align_planes_to_axes_minimal_v2(
-        aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ
+        aligned_pcd, keep_inlier_clouds, optimized_planes, planeX, planeZ, verbose=verbose
     )
     
     # Validate results
     success, error_X, error_Z, total_angle = validate_minimal_rotation(
-        optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R_planes
+        optimized_planes, rotated_planes, planeX_idx, planeZ_idx, R_planes, verbose=verbose
     )    
     
-    print(f'\nPlane adjustment R matrix:\n{R_planes}')
+    print_verbose(f'\nPlane adjustment R matrix:\n{R_planes}', verbose)
     
     if R_flip is not None:
         R_total = R_planes @ R_90X @ R_flip @ R_pca
     else:
         R_total = R_planes @ R_90X @ R_pca
     
-    print(f'\nR Total:\n{R_total}')
+    print_verbose(f'\nR Total:\n{R_total}', verbose)
     
     # === STEP 1: Load the original mesh ===
     original_mesh = load_mesh(fixture_scan_path)
@@ -1613,17 +1359,18 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # === RESULT ===
     transformed_reference_mesh = copy.deepcopy(original_mesh)
     
-    o3d.visualization.draw_geometries([
-        aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
-        transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
-        pre_minimal_rotation_mesh.paint_uniform_color([0, 0, 1]),
-        axis], window_name="Transformed Reference Mesh (pre-minimal rotation is blue)")
+    if visualization:
+        o3d.visualization.draw_geometries([
+            aligned_pcd.paint_uniform_color([0.5, 0.5, 0.5]),
+            transformed_reference_mesh.paint_uniform_color([1, 0, 0]),
+            pre_minimal_rotation_mesh.paint_uniform_color([0, 0, 1]),
+            axis], window_name="Transformed Reference Mesh (pre-minimal rotation is blue)")
 
     # Load and align matched specimen
     # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
-    matched_specimen_mesh = load_mesh(specimen_scan_path)
+    matched_specimen_mesh = load_mesh(specimen_scan_path, verbose=verbose)
     
-    aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh)
+    aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh, visualize=visualization, verbose=verbose)
     
     
     # Perform anvil alignment adjustment here (require specific spacing and orthogonal to base)
@@ -1634,7 +1381,6 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # inlier_clouds_list = [rotated_inlier_clouds[idx] for idx in plane_indices]
     
     optimized_anvil_planes, anvil_optimization_results = optimize_anvil_planes(rotated_planes, rotated_inlier_clouds)
-    # optimized_anvil_planes = optimize_anvil_planes_v2(planes_list, inlier_clouds_list)
     
     #### Create mesh models of support and anvil cylinders
     idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(optimized_anvil_planes[1:5])
@@ -1642,11 +1388,11 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     
     diameter = 10
     height = 40
-    support_height_offset = 35
+    support_offset = 25 # Distance from outer planes to support cylinders
     anvil_offset = 70
     
     base_plane = rotated_planes[0]
-    base_support_offset = 52
+    base_support_offset = 52 # Distance from base plane to center of support cylinders
     
     # support_offset = 25.4   # 1 inch
     
@@ -1668,7 +1414,7 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # r_support_plane = rotated_planes[x_plane_indices[3]]
     l_support, r_support = create_supports_relative_to_planes(
                             l_support_plane, r_support_plane, base_plane,
-                            support_height_offset, base_support_offset,
+                            support_offset, base_support_offset,
                             diameter, height)
     
     l_support_mesh = trimesh_to_open3d(l_support)
@@ -1679,12 +1425,13 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
 
     # Visualize optimized planes and the inlier clouds used for fitting
     cylinder_meshes = [anvil_mesh, l_support_mesh, r_support_mesh]
-    o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
+    if visualization:
+        o3d.visualization.draw_geometries([rotated_pcd] + [axis] + cylinder_meshes + [aligned_specimen_mesh], window_name="Aligned Cylinders")
     
-    anvil = ensure_normals_outward(anvil, mesh_name="anvil")
-    l_support = ensure_normals_outward(l_support, mesh_name="left_support")
-    r_support = ensure_normals_outward(r_support, mesh_name="right_support")
-    flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh")
+    anvil = ensure_normals_outward(anvil, mesh_name="anvil", verbose=verbose)
+    l_support = ensure_normals_outward(l_support, mesh_name="left_support", verbose=verbose)
+    r_support = ensure_normals_outward(r_support, mesh_name="right_support", verbose=verbose)
+    flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh", verbose=verbose)
     
     # Combine meshes
     all_meshes = [flex_mesh, anvil, l_support, r_support]
@@ -1702,7 +1449,7 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
             if all_meshes.index(anvil) in intersecting_indices:
                 # Move anvil up in Z
                 anvil.apply_translation([0, 0, increment])
-                print(f"Applying {increment} adjustment to Z position of anvil")
+                print_verbose(f"Applying {increment} adjustment to Z position of anvil", verbose)
                 # Recheck
                 updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if all_meshes.index(anvil) in updated:
@@ -1715,7 +1462,7 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
                 # Move both supports down in Z
                 l_support.apply_translation([0, 0, -increment])
                 r_support.apply_translation([0, 0, -increment])
-                print(f"Applying -{increment} adjustment to Z position of supports")
+                print_verbose(f"Applying -{increment} adjustment to Z position of supports", verbose)
                 # Recheck
                 updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if l_idx in updated or r_idx in updated:
@@ -1724,7 +1471,7 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
             if not still_intersecting:
                 break
         else:
-            print("Warning: Maximum adjustment iterations reached, intersection may still exist.")
+            print_verbose("Warning: Maximum adjustment iterations reached, intersection may still exist.", verbose)
     
     # Adjust for good measure
     n_increments = 2
@@ -1737,23 +1484,23 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path):
     # output_filepath = "E:/Fixture Scans/prepared_test.stl"
     merged_mesh.export(output_path)
 
-def create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_folder):
+def create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder, visualization=False, verbose=False):
     df_test_data = pd.read_excel(test_data_filepath)
     os.makedirs(prepared_meshes_folder, exist_ok=True)
     
     # Iterate through df_test_data and create the necessary multibody STL files for simulation
     for index, row in df_test_data.iterrows():
         fixture_scan_filename = row["Fixture Scan File"]
-        fixture_scan_path = os.path.join(scanned_meshes_folder, fixture_scan_filename)
+        fixture_scan_path = os.path.join(scanned_fixtures_folder, fixture_scan_filename)
         
         specimen_scan_filename = row["Specimen Scan File"]
-        specimen_scan_path = os.path.join(scanned_meshes_folder, specimen_scan_filename)
+        specimen_scan_path = os.path.join(scanned_specimens_folder, specimen_scan_filename)
         
         specimen = row["Specimen"]
         test_num = row["Test_Num"]
-        output_filename = f"{specimen}_{test_num}.stl"
+        output_filename = f"{specimen}_Test{int(test_num)}.stl"
         output_path = os.path.join(prepared_meshes_folder, output_filename)
-        create_model(fixture_scan_path, specimen_scan_path, output_path)
+        create_model(fixture_scan_path, specimen_scan_path, output_path, visualization=visualization, verbose=verbose)
         
         # Save the job name and add it to test_data.xlsx
         job_name = f"{specimen}_{test_num}"
@@ -1762,7 +1509,7 @@ def create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_fol
         # Save the test specific mesh file name and add it to test_data.xlsx
         df_test_data.loc[index, "Test Specific Mesh File"] = output_path
         
-        print(f"{output_filename} model and job creation complete")
+        print(f"{output_filename} model creation complete")
         
     # Export changed dataframe
     df_test_data.to_excel(test_data_filepath, index=False)
@@ -1770,8 +1517,15 @@ def create_models(test_data_filepath, scanned_meshes_folder, prepared_meshes_fol
     
 
 if __name__ == "__main__":
-    fixture_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures/X4_Test3_raw.stl"
-    specimen_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens/X4_raw.stl"
-    output_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes/X4_Test3.stl"
+    # fixture_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures/X4_Test2_raw.stl"
+    # specimen_scan_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens/X4_raw.stl"
+    # output_path = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes/X4_Test2.stl"
     
-    create_model(fixture_scan_path, specimen_scan_path, output_path)
+    # create_model(fixture_scan_path, specimen_scan_path, output_path)
+    
+    test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    scanned_fixtures_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures"
+    scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
+    prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
+    
+    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder)
