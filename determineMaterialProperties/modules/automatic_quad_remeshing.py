@@ -7,6 +7,7 @@ Created on Thu May 29 12:35:02 2025
 
 import bpy
 import os
+import sys
 
 def clear_scene():
     bpy.ops.object.select_all(action='SELECT')
@@ -54,9 +55,35 @@ def quad_remesh_aligned_meshes(input_folder, output_folder):
         # Export the result
         output_path = os.path.join(output_folder, new_filename)
         bpy.ops.wm.stl_export(filepath=output_path)  # use correct format
+        
+def quad_remesh_single_specimen(input_path, output_path):
+    
+    clear_scene()
+    
+    # Import the model
+    bpy.ops.wm.stl_import(filepath=input_path)
+    
+    # Get imported object
+    obj = bpy.context.selected_objects[0]
+    
+    # Apply Quad Remesher
+    remesh_with_quad_remesher(obj)
+    
+    # Export the result
+    bpy.ops.wm.stl_export(filepath=output_path)
     
 if __name__ == "__main__":
-    input_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
-    output_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    # input_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
+    # output_folder = "G:/Shared drives/RockWell Shared/Projects/Rockwell Redesign/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
     
-    quad_remesh_aligned_meshes(input_folder, output_folder)
+    # quad_remesh_aligned_meshes(input_folder, output_folder)
+    
+    argv = sys.argv
+    argv = argv[argv.index("--") + 1:] # Get all args after '--'
+    
+    if len(argv) != 2:
+        print("Usage: blender --background --python automatic_quad_remeshing.py -- <input_path> <output_path>")
+        sys.exit(1)
+        
+    input_path, output_path = argv
+    quad_remesh_single_specimen(input_path, output_path)

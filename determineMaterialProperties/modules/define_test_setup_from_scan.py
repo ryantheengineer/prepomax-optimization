@@ -11,6 +11,8 @@ import pandas as pd
 import os
 import fixture_plane_fitting
 import time
+import subprocess
+import trimesh
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
     # Create a square plane oriented by the plane normal
@@ -1433,10 +1435,32 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
     r_support = ensure_normals_outward(r_support, mesh_name="right_support", verbose=verbose)
     flex_mesh = ensure_normals_outward(aligned_specimen_mesh, mesh_name="flex_mesh", verbose=verbose)
     
-    # Combine meshes
-    all_meshes = [flex_mesh, anvil, l_support, r_support]
     
-    intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    ### Quad remesh step
+    # Save the flex_mesh object on its own
+    aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
+    aligned_flex_mesh_filename = os.path.basename(specimen_scan_path).replace("raw","aligned")
+    aligned_flex_mesh_path = aligned_scans_folder + "/" + aligned_flex_mesh_filename
+    flex_mesh.export(aligned_flex_mesh_path)
+    
+    quad_remesh_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    quad_remesh_filename = aligned_flex_mesh_filename.replace("aligned", "quad")
+    quad_remesh_path = quad_remesh_folder + "/" + quad_remesh_filename
+    
+    blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
+    quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
+    subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path, "--", aligned_flex_mesh_path, quad_remesh_path])
+    
+    quad_mesh = trimesh.load(quad_remesh_path)
+
+    
+    
+    # Combine meshes
+    all_meshes = [quad_mesh, anvil, l_support, r_support]
+    # all_meshes = [flex_mesh, anvil, l_support, r_support]
+    
+    intersecting_indices = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+    # intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
     
     increment = 0.01  # Adjust the movement step as needed
     max_iterations = 100  # Prevent infinite loops
@@ -1451,7 +1475,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
                 anvil.apply_translation([0, 0, increment])
                 print_verbose(f"Applying {increment} adjustment to Z position of anvil", verbose)
                 # Recheck
-                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+                # updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if all_meshes.index(anvil) in updated:
                     still_intersecting = True
     
@@ -1464,7 +1489,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
                 r_support.apply_translation([0, 0, -increment])
                 print_verbose(f"Applying -{increment} adjustment to Z position of supports", verbose)
                 # Recheck
-                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+                # updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if l_idx in updated or r_idx in updated:
                     still_intersecting = True
     

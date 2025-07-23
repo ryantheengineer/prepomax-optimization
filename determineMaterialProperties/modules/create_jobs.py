@@ -10,8 +10,8 @@ folders and file structure to be uploaded to S3.
 
 from prepareScans import process_scans
 # from automatic_quad_remeshing import quad_remesh_aligned_meshes
-from createModelsV2 import create_models
-# from createModels import create_models
+# from createModelsV2 import create_models
+from define_test_setup_from_scan import create_models
 import subprocess
 import pandas as pd
 import os
@@ -19,37 +19,46 @@ import shutil
 import yaml
 
 def create_jobs(poisson):
-    # PCA align the raw scan meshes
-    raw_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans"
-    aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
+    # # PCA align the raw scan meshes
+    # raw_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans"
+    # aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
     
-    print("\nProcessing raw scans - aligning them with PCA")
-    process_scans(raw_scans_folder, aligned_scans_folder)
+    # print("\nProcessing raw scans - aligning them with PCA")
+    # process_scans(raw_scans_folder, aligned_scans_folder)
     
-    # Quad remesh
-    quad_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
-    blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
-    quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
-    # quad_remesh_aligned_meshes(aligned_scans_folder, quad_meshes_folder)
-    print("\nUsing quad remesher in Blender to prepare aligned meshes")
-    subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path])
-    print("Quad remesher processing complete\n")
+    # # Quad remesh
+    # quad_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    # blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
+    # quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
+    # # quad_remesh_aligned_meshes(aligned_scans_folder, quad_meshes_folder)
+    # print("\nUsing quad remesher in Blender to prepare aligned meshes")
+    # subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path])
+    # print("Quad remesher processing complete\n")
     
-    # NOTE: Need to decide which of the quad mesh files are aligned correctly to match the test orientations
-    # Visualize the mesh files and accept them?
-    print("#"*60)
-    print("#"*60)
-    print("PAUSING HERE TO MANUALLY UPDATE test_data.xlsx with the files that give the correct orientation.")
-    print("#"*60)
-    print("#"*60)
-    input("\nPress ENTER when test_data.xlsx has been updated...")
+    # # NOTE: Need to decide which of the quad mesh files are aligned correctly to match the test orientations
+    # # Visualize the mesh files and accept them?
+    # print("#"*60)
+    # print("#"*60)
+    # print("PAUSING HERE TO MANUALLY UPDATE test_data.xlsx with the files that give the correct orientation.")
+    # print("#"*60)
+    # print("#"*60)
+    # input("\nPress ENTER when test_data.xlsx has been updated...")
     
-    # Create test-specific mesh files based on real test data
+    # # Create test-specific mesh files based on real test data
+    # test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    # prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
+    
+    # print("\nCreating test-specific mesh files based on real test data")
+    # create_models(test_data_filepath, quad_meshes_folder, prepared_meshes_folder)
+    
+    
     test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    scanned_fixtures_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures"
+    scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
     prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
-    print("\nCreating test-specific mesh files based on real test data")
-    create_models(test_data_filepath, quad_meshes_folder, prepared_meshes_folder)
+    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder)
+    
     
     # Create job folders with YAML config files and the test-specific meshes
     print("\nCreating job folders and necessary files")
@@ -61,7 +70,8 @@ def create_jobs(poisson):
         job_name = row["Job Name"]
         
         # Create a folder in jobs_folder
-        job_folder = os.path.join(jobs_folder, job_name)
+        job_folder = jobs_folder + "/" + job_name
+        # job_folder = os.path.join(jobs_folder, job_name)
         os.makedirs(job_folder, exist_ok=True)
         
         # Place the correct test mesh in the folder
