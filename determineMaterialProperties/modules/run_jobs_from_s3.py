@@ -17,17 +17,39 @@ from pathlib import Path
 import time
 
 def get_instance_id():
-    """Get the EC2 instance ID for unique identification"""
+    """
+    Gets the EC2 instance ID using IMDSv2.
+    Falls back to a locally generated ID if not on EC2 or metadata is inaccessible.
+    """
     try:
-        response = requests.get(
-            'http://169.254.169.254/latest/meta-data/instance-id', 
+        # Step 1: Get a metadata token
+        token_response = requests.put(
+            'http://169.254.169.254/latest/api/token',
+            headers={'X-aws-ec2-metadata-token-ttl-seconds': '21600'},
             timeout=2
         )
-        return response.text
-    except:
-        # Fallback if not on EC2 (for testing)
-        import uuid
-        return f"local-{uuid.uuid4().hex[:8]}"
+        token_response.raise_for_status()
+        token = token_response.text
+
+        # Step 2: Use the token to get the instance ID
+        metadata_response = requests.get(
+            'http://169.254.169.254/latest/meta-data/instance-id',
+            headers={'X-aws-ec2-metadata-token': token},
+            timeout=2
+        )
+        metadata_response.raise_for_status()
+        return metadata_response.text.strip()
+
+    except Exception as e:
+        print(f"⚠ Warning: Failed to fetch EC2 metadata via IMDSv2: {e}. Falling back to local ID.")
+
+    # Fallback for local development or failure
+    import uuid
+    fallback_id = f"local-{uuid.uuid4().hex[:8]}"
+    print(f"⚠ Using fallback instance ID: {fallback_id}")
+    return fallback_id
+
+
 
 def claim_job(job_key, s3, bucket):
     """
@@ -254,36 +276,38 @@ def main_processing_loop():
 def terminate_instance():
     with open('s3_config.yaml', 'r') as f:
         config = yaml.safe_load(f)
+
+    instance_id = get_instance_id()
+    if instance_id.startswith("local-"):
+        print(f"⚠ Skipping instance termination: Not running on EC2 (ID = {instance_id})")
+        return
+
     try:
-        # Get instance ID from metadata
-        response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
-        instance_id = response.text
         print(f"Terminating instance: {instance_id}")
-        
         ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2'))
         ec2.terminate_instances(InstanceIds=[instance_id])
-        
-        # Sleep to allow shutdown
-        time.sleep(30)
+        time.sleep(30)  # Allow shutdown
     except Exception as e:
         print(f"Error terminating instance: {e}")
+
         
 def stop_instance():
     with open('s3_config.yaml', 'r') as f:
         config = yaml.safe_load(f)
+
+    instance_id = get_instance_id()
+    if instance_id.startswith("local-"):
+        print(f"⚠ Skipping instance stop: Not running on EC2 (ID = {instance_id})")
+        return
+
     try:
-        # Get instance ID from metadata
-        response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
-        instance_id = response.text
         print(f"Stopping instance: {instance_id}")
-        
         ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2'))
         ec2.stop_instances(InstanceIds=[instance_id])
-        
-        # Sleep to allow shutdown
-        time.sleep(30)
+        time.sleep(30)  # Give it time to stop
     except Exception as e:
         print(f"Error stopping instance: {e}")
+
 
 # Replace your existing main loop with:
 if __name__ == "__main__":
