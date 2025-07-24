@@ -313,12 +313,12 @@ def stop_instance():
 if __name__ == "__main__":
     job_processed, config = main_processing_loop()
     
-    if job_processed:
-        print("All results uploaded. Initiating shutdown...")
-        stop_instance()
-    else:
-        print("No jobs processed. Shutting down...")
-        stop_instance()
+    # if job_processed:
+    #     print("All results uploaded. Initiating shutdown...")
+    #     stop_instance()
+    # else:
+    #     print("No jobs processed. Shutting down...")
+    #     stop_instance()
 
 
 # import boto3
