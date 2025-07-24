@@ -215,10 +215,10 @@ def process_job(job_key, s3, bucket):
                 f'{job_folder}/{fname}'
             )
 
-# Updated main processing loop
+# Updated main processing loop to continuously process jobs
 def main_processing_loop():
     """
-    Updated main loop that handles job claiming more robustly
+    Continuously process jobs until no more unclaimed jobs are available
     """
     s3 = boto3.client('s3')
     
@@ -235,43 +235,55 @@ def main_processing_loop():
     print(f"Prefix:\t{prefix}")
     print("#"*60)
     
-    # Look for unclaimed jobs
-    unclaimed_jobs = list_unclaimed_jobs(s3, bucket, prefix)
+    jobs_processed = 0
     
-    if not unclaimed_jobs:
-        print("No unclaimed jobs found.")
-        return False, config
-    
-    print(f"Found {len(unclaimed_jobs)} unclaimed job(s)")
-    
-    # Try to claim jobs (shuffle for better distribution across instances)
-    import random
-    random.shuffle(unclaimed_jobs)
-    
-    for job_key in unclaimed_jobs:
-        print(f"\nAttempting to claim job: {job_key}")
+    while True:
+        # Look for unclaimed jobs
+        unclaimed_jobs = list_unclaimed_jobs(s3, bucket, prefix)
         
-        if claim_job(job_key, s3, bucket):
-            try:
-                print(f"Processing job: {job_key}")
-                process_job(job_key, s3, bucket)
-                
-                # Release the lock when done
-                release_job_lock(job_key, s3, bucket)
-                print(f"✓ Job completed successfully: {job_key}")
-                return True, config
-                
-            except Exception as e:
-                print(f"✗ Error processing job {job_key}: {e}")
-                # Release lock on failure so job can be retried
-                release_job_lock(job_key, s3, bucket)
-                # Continue to try other jobs rather than failing completely
-                continue
-        else:
-            print(f"Could not claim job: {job_key}")
+        if not unclaimed_jobs:
+            print(f"No more unclaimed jobs found. Total jobs processed: {jobs_processed}")
+            break
+        
+        print(f"\nFound {len(unclaimed_jobs)} unclaimed job(s)")
+        
+        # Try to claim jobs (shuffle for better distribution across instances)
+        import random
+        random.shuffle(unclaimed_jobs)
+        
+        job_claimed_this_cycle = False
+        
+        for job_key in unclaimed_jobs:
+            print(f"\nAttempting to claim job: {job_key}")
+            
+            if claim_job(job_key, s3, bucket):
+                try:
+                    print(f"Processing job: {job_key}")
+                    process_job(job_key, s3, bucket)
+                    
+                    # Keep the lock file as a permanent record of completion
+                    print(f"✓ Job completed successfully: {job_key} (lock file retained)")
+                    
+                    jobs_processed += 1
+                    job_claimed_this_cycle = True
+                    break  # Process one job at a time, then check for more
+                    
+                except Exception as e:
+                    print(f"✗ Error processing job {job_key}: {e}")
+                    # Release lock on failure so job can be retried
+                    release_job_lock(job_key, s3, bucket)
+                    # Continue to try other jobs rather than failing completely
+                    continue
+            else:
+                print(f"Could not claim job: {job_key}")
+        
+        if not job_claimed_this_cycle:
+            print("No jobs could be claimed by this instance in this cycle.")
+            # Wait a bit before checking again in case other instances are releasing jobs
+            print("Waiting 10 seconds before checking for jobs again...")
+            time.sleep(10)
     
-    print("No jobs could be claimed by this instance.")
-    return False, config
+    return jobs_processed > 0, config
 
 def terminate_instance():
     with open('s3_config.yaml', 'r') as f:
@@ -309,170 +321,13 @@ def stop_instance():
         print(f"Error stopping instance: {e}")
 
 
-# Replace your existing main loop with:
+# Updated main execution to continuously process jobs until none remain
 if __name__ == "__main__":
-    job_processed, config = main_processing_loop()
+    any_jobs_processed, config = main_processing_loop()
     
-    # if job_processed:
-    #     print("All results uploaded. Initiating shutdown...")
-    #     stop_instance()
-    # else:
-    #     print("No jobs processed. Shutting down...")
-    #     stop_instance()
-
-
-# import boto3
-# import yaml
-# import os
-# import subprocess
-# import botocore.exceptions
-# from pathlib import Path
-# import requests
-# import time
-
-
-# def list_jobs(s3, bucket, prefix):
-#     result = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-#     return [obj['Key'] for obj in result.get('Contents', []) if obj['Key'].endswith('.yaml')]
-
-# def claim_job(job_key, s3, bucket):
-#     lock_key = job_key.replace('.yaml', '.lock')
-#     try:
-#         # Try to fetch the lock object
-#         s3.get_object(Bucket=bucket, Key=lock_key)
-#         return False  # Lock already exists
-#     except botocore.exceptions.ClientError as e:
-#         error_code = e.response['Error']['Code']
-#         if error_code == 'NoSuchKey':
-#             # Lock does not exist; create it
-#             s3.put_object(Bucket=bucket, Key=lock_key, Body=b'claimed')
-#             return True
-#         else:
-#             # Some other error occurred
-#             raise
-
-# def process_job(job_key, s3, bucket):
-#     # Download YAML and related files
-#     print("Downloading YAML and related files...")
-#     job_folder = os.path.dirname(job_key)
-#     local_job_dir = Path('/tmp/job')
+    if any_jobs_processed:
+        print("All available jobs have been processed. Initiating shutdown...")
+    else:
+        print("No jobs were processed. Initiating shutdown...")
     
-#     # Clean local job directory
-#     print(f"Cleaning local job directory:\t{local_job_dir}")
-#     if os.path.exists(local_job_dir):
-#         for f in os.listdir(local_job_dir):
-#             os.remove(os.path.join(local_job_dir, f))
-#     else:
-#         os.makedirs(local_job_dir)
-        
-#     # Download all files in the job folder
-#     result = s3.list_objects_v2(Bucket=bucket, Prefix=job_folder + '/')
-#     for obj in result.get('Contents', []):
-#         key = obj['Key']
-#         filename = os.path.basename(key)
-#         local_path = os.path.join(local_job_dir, filename)
-#         s3.download_file(bucket, key, local_path)
-
-#     print("Listing downloaded job files:")
-#     for fname in os.listdir(local_job_dir):
-#         print(f'\t{fname}')
-    
-#     # Run FEA + optimization
-#     # job_yaml_path = os.path.join(local_job_dir, os.path.basename(job_key))
-#     job_yaml_path = local_job_dir / os.path.basename(job_key)
-#     job_yaml_path_str = str(job_yaml_path)
-    
-#     with open(job_yaml_path_str, 'r') as f:
-#         job_config = yaml.safe_load(f)
-        
-#     job_name = job_config["job_name"]
-#     results_directory = job_config["results_directory"]
-#     opt_working_directory = job_config["opt_working_directory"]
-    
-        
-#     print(f'WORKING ON JOB:\t{job_name}')
-#     print(f'RESULTS WILL BE SENT TO:\t{results_directory}')
-    
-#     print(f"This is where the optimization will run with {job_yaml_path_str}")
-#     subprocess.run(
-#         ['python', 'runOptimizationCLI.py', job_yaml_path_str],
-#         cwd=opt_working_directory,
-#         text=True
-#     )
-    
-#     # # Optionally save stdout/stderr to files
-#     # with open(os.path.join(local_job_dir, 'stdout.log'), 'w') as f:
-#     #     f.write(result.stdout)
-#     # with open(os.path.join(local_job_dir, 'stderr.log'), 'w') as f:
-#     #     f.write(result.stderr)
-    
-#     # Upload results back to the job folder
-#     print("This is where the results will be uploaded back to S3")
-#     extensions = (".png", ".result", ".log", ".dat", ".frd", ".txt", ".inp")
-#     for fname in os.listdir(results_directory):
-#         if fname.endswith(extensions):
-#             print(f"\tFile '{fname}' will be uploaded to S3")
-#     #     if fname.endswith('.result') or fname.endswith('.log') or fname.startswith('results'):
-#             s3.upload_file(
-#                 os.path.join(results_directory, fname),
-#                 bucket,
-#                 f'{job_folder}/{fname}'
-#             )
-    
-# def terminate_instance(config):
-#     try:
-#         # Get instance ID from metadata
-#         response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
-#         instance_id = response.text
-#         print(f"Terminating instance: {instance_id}")
-        
-#         ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2b'))
-#         ec2.terminate_instances(InstanceIds=[instance_id])
-        
-#         # Sleep to allow shutdown
-#         time.sleep(30)
-#     except Exception as e:
-#         print(f"Error terminating instance: {e}")
-        
-# def stop_instance(config):
-#     try:
-#         # Get instance ID from metadata
-#         response = requests.get('http://169.254.169.254/latest/meta-data/instance-id', timeout=5)
-#         instance_id = response.text
-#         print(f"Stopping instance: {instance_id}")
-        
-#         ec2 = boto3.client('ec2', region_name=config.get('region', 'us-east-2'))
-#         ec2.stop_instances(InstanceIds=[instance_id])
-        
-#         # Sleep to allow shutdown
-#         time.sleep(30)
-#     except Exception as e:
-#         print(f"Error stopping instance: {e}")
-
-
-# def main_process():
-#     s3 = boto3.client('s3')
-    
-#     with open('s3_config.yaml', 'r') as f:
-#         config = yaml.safe_load(f)
-        
-#     bucket = config['bucket']
-#     prefix = config['prefix']
-    
-#     print("")
-#     print("#"*60)
-#     print(f"Bucket:\t{bucket}")
-#     print(f"Prefix:\t{prefix}")
-    
-#     for job_key in list_jobs(s3, bucket, prefix):
-#         print(f"Current job key:\t{job_key}")
-#         if claim_job(job_key, s3, bucket):
-#             process_job(job_key, s3, bucket)
-#             break  # Stop after one job; instance shuts down or can loop
-            
-#     print("All results uploaded. Initiating shutdown...")
-#     stop_instance(config)
-#     # terminate_instance(config)
-    
-# if __name__ == "__main__":
-#     main_process()
+    stop_instance()
