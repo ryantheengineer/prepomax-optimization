@@ -59,6 +59,9 @@ def create_jobs(poisson):
     
     create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder)
     
+    input("Pausing here to allow manual quad remeshing... Press Enter to continue")
+    input("Press Enter to confirm that all test mesh files have had quad remesh applied to them.")
+    
     
     # Create job folders with YAML config files and the test-specific meshes
     print("\nCreating job folders and necessary files")

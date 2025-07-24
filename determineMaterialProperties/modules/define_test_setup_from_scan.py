@@ -13,6 +13,7 @@ import fixture_plane_fitting
 import time
 import subprocess
 import trimesh
+import shutil
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
     # Create a square plane oriented by the plane normal
@@ -126,10 +127,21 @@ def optimize_constrained_planes(planes, clouds, bound_factor=2.0, constraint_tol
     result : dict
         Optimization results and diagnostics
     """
-    
-    # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
-    idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(planes[1:5])
-    x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+    max_attempts = 10
+    attempt = 0
+    while True:
+        try:
+            # Identify which indices correspond to outer and inner planes in keep_planes[1:5]
+            idx_outer1, idx_inner1, idx_inner2, idx_outer2 = identify_planes_along_x(planes[1:5])
+            x_plane_indices = [1 + idx_outer1, 1 + idx_inner1, 1 + idx_inner2, 1 + idx_outer2]
+            break
+        except ValueError as e:
+            print(f"Plane finding error: {e}")
+            attempt += 1
+            if attempt == max_attempts:
+                raise Exception("Max plane finding attempts reached")
+            continue
+        
     
     # Get original planes and point clouds
     base_plane = planes[0]
@@ -1437,30 +1449,66 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
     
     
     ### Quad remesh step
+    print_verbose("\nStarting quad remesh step", verbose)
     # Save the flex_mesh object on its own
     aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
     aligned_flex_mesh_filename = os.path.basename(specimen_scan_path).replace("raw","aligned")
     aligned_flex_mesh_path = aligned_scans_folder + "/" + aligned_flex_mesh_filename
     flex_mesh.export(aligned_flex_mesh_path)
     
-    quad_remesh_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
-    quad_remesh_filename = aligned_flex_mesh_filename.replace("aligned", "quad")
-    quad_remesh_path = quad_remesh_folder + "/" + quad_remesh_filename
+    # # Make a copy of the file at aligned_flex_mesh_path in the temp folder of the aligned folder
+    # temp_dir = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans/temp"
+    # os.makedirs(temp_dir, exist_ok=True)
+    # shutil.copy(aligned_flex_mesh_path, temp_dir)
     
-    blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
-    quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
-    subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path, "--", aligned_flex_mesh_path, quad_remesh_path])
+    # # # Quad remesh
+    # # quad_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    # # blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
+    # # quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
+    # # # quad_remesh_aligned_meshes(aligned_scans_folder, quad_meshes_folder)
+    # # print("\nUsing quad remesher in Blender to prepare aligned meshes")
+    # # subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path])
+    # # print("Quad remesher processing complete\n")
+        
+    # quad_remesh_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/3 - Quad Meshes"
+    # quad_remesh_filename = aligned_flex_mesh_filename.replace("aligned", "quad")
+    # quad_remesh_path = quad_remesh_folder + "/" + quad_remesh_filename
+        
+    # blender_exe = "C:/Program Files/Blender Foundation/Blender 4.3/blender.exe"
+    # quad_remesh_script_path = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/modules/automatic_quad_remeshing.py"
+    # try:
+    #     # result = subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path], 
+    #     #                        capture_output=True, text=True, encoding='utf-8', errors='replace')
+
+    #     subprocess.run([blender_exe, "--python", quad_remesh_script_path])
+    #     # subprocess.run([blender_exe, "--background", "--python", quad_remesh_script_path])
+        
+    #     # print("STDOUT:", result.stdout)
+    #     # print("STDERR:", result.stderr)
+    #     # print("Return code:", result.returncode)
+        
+    #     # if result.returncode != 0:
+    #     #     print("ERROR: Blender script failed!")
+            
+    # except Exception as e:
+    #     print(f"Exception running Blender: {e}")    
     
-    quad_mesh = trimesh.load(quad_remesh_path)
+    # # # Delete temporarily copied aligned mesh from temp folder
+    # # for filename in os.listdir(temp_dir):
+    # #     file_path = os.path.join(temp_dir, filename)
+    # #     if os.path.isfile(file_path):
+    # #         os.remove(file_path)
+    
+    # quad_mesh = trimesh.load(quad_remesh_path)
 
     
     
     # Combine meshes
-    all_meshes = [quad_mesh, anvil, l_support, r_support]
-    # all_meshes = [flex_mesh, anvil, l_support, r_support]
+    # all_meshes = [quad_mesh, anvil, l_support, r_support]
+    all_meshes = [flex_mesh, anvil, l_support, r_support]
     
-    intersecting_indices = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
-    # intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+    # intersecting_indices = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+    intersecting_indices = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
     
     increment = 0.01  # Adjust the movement step as needed
     max_iterations = 100  # Prevent infinite loops
@@ -1475,8 +1523,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
                 anvil.apply_translation([0, 0, increment])
                 print_verbose(f"Applying {increment} adjustment to Z position of anvil", verbose)
                 # Recheck
-                updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
-                # updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                # updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if all_meshes.index(anvil) in updated:
                     still_intersecting = True
     
@@ -1489,8 +1537,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
                 r_support.apply_translation([0, 0, -increment])
                 print_verbose(f"Applying -{increment} adjustment to Z position of supports", verbose)
                 # Recheck
-                updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
-                # updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
+                # updated = check_vertex_intersections(quad_mesh, all_meshes, threshold=1e-4)
+                updated = check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4)
                 if l_idx in updated or r_idx in updated:
                     still_intersecting = True
     
@@ -1554,4 +1602,4 @@ if __name__ == "__main__":
     scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
     prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
-    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder)
+    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder, verbose=True)
