@@ -99,6 +99,9 @@ if __name__ == "__main__":
     # print(f"Modulus calculated at {modulus_opt} MPa")
     logger.info(f"Modulus calculated at {modulus_opt} MPa")
     
+    tend = time.time()
+    t_calculation = tend - tstart
+    
     # Define the filename with your desired custom extension
     result_filename = f"{job_name}.result"
     result_filename = os.path.join(params['results_directory'], result_filename)
@@ -107,7 +110,8 @@ if __name__ == "__main__":
     result_content = f"Job:\t{job_name}\n" \
                     f"Modulus:\t{modulus_opt} MPa\n" \
                     f"Target Stiffness:\t{params['target_stiffness']} N/mm\n" \
-                    f"Abs Stiffness Error:\t{stiffness_opt} N/mm\n"
+                    f"Abs Stiffness Error:\t{stiffness_opt} N/mm\n" \
+                    f"Calculation Time:\t{t_calculation / 60.0} min"
     
     # Open the file in write mode ('w')
     # 'w' mode will create the file if it doesn't exist, or overwrite it if it does.
@@ -147,8 +151,6 @@ if __name__ == "__main__":
     
     # plt.show()
 
-    tend = time.time()
-    t_calculation = tend - tstart
     if t_calculation < 60.0:
         # print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
         logger.info(f"Calculation time:\t{t_calculation:.2f} sec")
