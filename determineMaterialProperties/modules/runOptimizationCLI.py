@@ -69,6 +69,9 @@ if __name__ == "__main__":
     # base_dir = Path(__file__).resolve().parent.parent
     results_dir = params['results_directory']
     job_name = params['job_name']
+    
+    # Make sure results directory exists
+    os.makedirs(results_dir, exist_ok=True)
 
     # Configure logging
     # timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -113,15 +116,12 @@ if __name__ == "__main__":
                     f"Abs Stiffness Error:\t{stiffness_opt} N/mm\n" \
                     f"Calculation Time:\t{t_calculation / 60.0} min"
     
-    # Open the file in write mode ('w')
-    # 'w' mode will create the file if it doesn't exist, or overwrite it if it does.
+    # Open the file in write mode
     try:
         with open(result_filename, 'w') as file:
             file.write(result_content)
-        # print(f"File '{result_filename}' created successfully.")
         logger.info(f"File '{result_filename}' created successfully.")
     except IOError as e:
-        # print(f"Error writing to file: {e}")
         logger.error(f"Error writing to file: {e}")
     
     ### Plot and save the optimization progress
