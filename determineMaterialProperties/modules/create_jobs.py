@@ -88,6 +88,7 @@ def create_jobs(poisson):
         # Create unique results directory for each job
         base_results_dir = 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/output'
         unique_results_dir = os.path.join(base_results_dir, job_name)
+        unique_results_dir = unique_results_dir.replace(os.sep, "/")
         
         # Create the YAML parameters
         params = {'poisson': poisson,
