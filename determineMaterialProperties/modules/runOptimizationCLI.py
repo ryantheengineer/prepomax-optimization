@@ -104,7 +104,8 @@ if __name__ == "__main__":
     result_filename = os.path.join(params['results_directory'], result_filename)
     
     # The content you want to write to the file
-    result_content = f"Modulus:\t{modulus_opt} MPa\n" \
+    result_content = f"Job:\t{job_name}\n" \
+                    f"Modulus:\t{modulus_opt} MPa\n" \
                     f"Target Stiffness:\t{params['target_stiffness']} N/mm\n" \
                     f"Abs Stiffness Error:\t{stiffness_opt} N/mm\n"
     

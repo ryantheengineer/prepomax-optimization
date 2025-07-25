@@ -85,10 +85,14 @@ def create_jobs(poisson):
         
         target_stiffness = row["Flexural Stiffness (N/mm)"]
         
+        # Create unique results directory for each job
+        base_results_dir = 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/output'
+        unique_results_dir = os.path.join(base_results_dir, job_name)
+        
         # Create the YAML parameters
         params = {'poisson': poisson,
                   'displacement': row["Displacement (mm)"],
-                  'results_directory': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/output',
+                  'results_directory': unique_results_dir,  # Now unique per job
                   'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
                   'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacement_v2.pmx',
                   'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/base_geometry.stl',
@@ -112,4 +116,3 @@ if __name__ == "__main__":
     poisson = 0.3
     
     create_jobs(poisson)
-    

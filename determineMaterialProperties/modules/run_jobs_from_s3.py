@@ -204,11 +204,25 @@ def process_job(job_key, s3, bucket):
     
     # Upload results back to the job folder
     print("This is where the results will be uploaded back to S3")
-    extensions = (".png", ".result", ".log", ".dat", ".frd", ".txt", ".inp")
+    filtered_extensions = (".png", ".result", ".log")  # Extensions that need job_name filtering
+    all_extensions = (".dat", ".frd", ".txt", ".inp")   # Extensions to upload without filtering
+    
     for fname in os.listdir(results_directory):
-        if fname.endswith(extensions):
+        should_upload = False
+        
+        if fname.endswith(filtered_extensions):
+            # For .png, .result, .log: only upload if filename contains job_name
+            if job_name in fname:
+                should_upload = True
+                print(f"\tFile '{fname}' contains job name - will be uploaded to S3")
+            else:
+                print(f"\tFile '{fname}' does not contain job name - skipping")
+        elif fname.endswith(all_extensions):
+            # For .dat, .frd, .txt, .inp: upload all files
+            should_upload = True
             print(f"\tFile '{fname}' will be uploaded to S3")
-    #     if fname.endswith('.result') or fname.endswith('.log') or fname.startswith('results'):
+        
+        if should_upload:
             s3.upload_file(
                 os.path.join(results_directory, fname),
                 bucket,
@@ -247,9 +261,9 @@ def main_processing_loop():
         
         print(f"\nFound {len(unclaimed_jobs)} unclaimed job(s)")
         
-        # Try to claim jobs (shuffle for better distribution across instances)
-        import random
-        random.shuffle(unclaimed_jobs)
+        # # Try to claim jobs (shuffle for better distribution across instances)
+        # import random
+        # random.shuffle(unclaimed_jobs)
         
         job_claimed_this_cycle = False
         
