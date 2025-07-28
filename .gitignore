@@ -32,3 +32,5 @@ determineMaterialProperties/modules/plane_analysis.xlsx
 determineMaterialProperties/pmx_files/base_geometry.stl
 determineMaterialProperties/pmx_files/displacement.pmx
 determineMaterialProperties/pmx_files/v2/base_geometry.stl
+determineMaterialProperties/pmx_files/v3/base_geometry.stl
+determineMaterialProperties/pmx_files/v3/displacement.pmx
