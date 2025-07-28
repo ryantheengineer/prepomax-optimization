@@ -263,13 +263,16 @@ def process_job(job_key, s3, bucket):
     # Run FEA + optimization with proper error handling
     print(f"\nRunning optimization with {job_yaml_path}")
     
+    timeout_hours = 20
+    timeout_seconds = timeout_hours * 3600
+    
     try:
         result = subprocess.run(
             ['python', 'runOptimizationCLI.py', str(job_yaml_path)],
             cwd=opt_working_directory,
             capture_output=True,
             text=True,
-            timeout=3600  # 1 hour timeout
+            timeout=timeout_seconds
         )
         
         # Check if the subprocess succeeded
