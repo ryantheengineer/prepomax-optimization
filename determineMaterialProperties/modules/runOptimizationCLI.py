@@ -14,23 +14,23 @@ import matplotlib.pyplot as plt
 import time
 import argparse
 from logger_config import setup_logger
-from datetime import datetime
-from pathlib import Path
+# from datetime import datetime
+# from pathlib import Path
 
-# Get the base directory (parent of this script's folder)
-base_dir = Path(__file__).resolve().parent.parent
+# # Get the base directory (parent of this script's folder)
+# base_dir = Path(__file__).resolve().parent.parent
 
-# Configure logging
-timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-log_dir = base_dir / "logs"
-# log_dir = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/logs"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"run_{timestamp}.log")
-setup_logger(log_file)
+# # Configure logging
+# timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+# log_dir = base_dir / "logs"
+# # log_dir = "C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/logs"
+# os.makedirs(log_dir, exist_ok=True)
+# log_file = os.path.join(log_dir, f"run_{timestamp}.log")
+# setup_logger(log_file)
 
-# Get a module-specific logger
-logger = logging.getLogger(__name__)
-logger.info("runOptimizationCLI.py started")
+# # Get a module-specific logger
+# logger = logging.getLogger(__name__)
+# logger.info("runOptimizationCLI.py started")
 
 
 def load_yaml(yaml_file):
