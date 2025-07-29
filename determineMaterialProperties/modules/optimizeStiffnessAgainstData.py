@@ -117,13 +117,13 @@ def objective_fun(modulus, params):
     # Unpack params dictionary
     # FEA model parameters
     poisson = params['poisson']
-    # preload = params['preload']
+    preload = params['preload']
     displacement = params['displacement']
 
     # Filepath parameters
     results_directory = params['results_directory']
     ccx_executable = params['ccx_executable']
-    # preload_pmx_file = params['preload_pmx_file']
+    preload_pmx_file = params['preload_pmx_file']
     disp_pmx_file = params['disp_pmx_file']
     # Geometry source file (original geometry file the .pmx file was created with)
     geo_source_file = params['geo_source_file']
@@ -136,41 +136,43 @@ def objective_fun(modulus, params):
     # global stiffnessHistory
     # global defHistory
 
-    # # Set up and run first .pmx file (preload only)
-    # print("Running preload simulation...\n")
-    # preload_params = f"modulus={modulus}; poisson={poisson}; preload={preload}"
-    # calculix_runner_preload = CalculiXRunner(results_directory,
-    #                                          ccx_executable,
-    #                                          pmx_file=preload_pmx_file,
-    #                                          geo_source_file=geo_source_file,
-    #                                          geo_target_file=geo_target_file,
-    #                                          params=preload_params,)
-    # calculix_runner_preload.regenerate_run()
+    # Set up and run first .pmx file (preload only)
+    print("Running preload simulation...\n")
+    preload_params = f"modulus={modulus}; poisson={poisson}; preload={preload}"
+    calculix_runner_preload = CalculiXRunner(results_directory,
+                                              ccx_executable,
+                                              pmx_file=preload_pmx_file,
+                                              geo_source_file=geo_source_file,
+                                              geo_target_file=geo_target_file,
+                                              params=preload_params,)
+    calculix_runner_preload.regenerate_run()
 
     # print(f"\nFinished running preload simulation in {time.time() - tStart:.2f} [s]")
 
-    # # Get the Z displacement from the preload and solve for the total required
-    # # displacement. This will be the minimum value since the load is in the
-    # # negative Z direction.
-    # # frd_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
-    # # frd_path = results_directory + '/' + frd_file + ".frd"
-    # # # frd_path = os.path.join(results_directory, frd_file + ".frd")
-    # # minDef = getNodeDef(frd_path)['dz'].min()
-    # preload_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
-    # dat_path = results_directory + '/' + preload_file + '.dat'    # Try this with a path library or os
-    # df_results = get_contact_force(dat_path)
+    # Get the Z displacement from the preload and solve for the total required
+    # displacement. This will be the minimum value since the load is in the
+    # negative Z direction.
+    # frd_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
+    # frd_path = results_directory + '/' + frd_file + ".frd"
+    # # frd_path = os.path.join(results_directory, frd_file + ".frd")
+    # minDef = getNodeDef(frd_path)['dz'].min()
+    preload_file = os.path.splitext(os.path.basename(preload_pmx_file))[0]
+    dat_path = results_directory + '/' + preload_file + '.dat'    # Try this with a path library or os
+    df_results = get_contact_force(dat_path)
     
-    # minDef = df_results['UZ'].min()
+    minDef = df_results['UZ'].min()
 
     # Assumes the displacement is defined as a positive value but used as a negative value in the simulation
-    # preload_displacement = np.abs(minDef)
+    preload_displacement = np.abs(minDef)
+    logger.info(f"Preload displacement calculated at {preload_displacement} mm")
     
-    # Estimate the necessary preload_displacement
-    preload_displacement = estimate_preload_displacement(geo_target_file)
+    # # Estimate the necessary preload_displacement
+    # preload_displacement = estimate_preload_displacement(geo_target_file)
     
     
     # preload_displacement = 1.2
     total_displacement = preload_displacement + np.abs(displacement)
+    logger.info(f"Total displacement calculated at {total_displacement} mm")
     
     # print(f'Preload displacement: {preload_displacement}')
     # print(f'Preload displacement: {np.abs(minDef)}')

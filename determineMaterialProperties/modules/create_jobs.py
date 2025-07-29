@@ -92,11 +92,13 @@ def create_jobs(poisson):
         
         # Create the YAML parameters
         params = {'poisson': poisson,
+                  'preload': row["Preload (N)"],
                   'displacement': row["Displacement (mm)"],
                   'results_directory': unique_results_dir,  # Now unique per job
                   'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
-                  'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacement_v2.pmx',
-                  'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/base_geometry.stl',
+                  'preload_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v3/preload.pmx',
+                  'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v3/displacement.pmx',
+                  'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v3/base_geometry.stl',
                   'geo_target_file': f'C:/tmp/job/{os.path.basename(test_mesh)}',
                   'target_stiffness': target_stiffness,
                   'log_file': f'{job_name}.log',
