@@ -272,18 +272,47 @@ if __name__ == "__main__":
     
     result = find_necessary_stiffness(params, min_modulus, max_modulus, xatol)
     
+    # modulus_opt = result.x
+    # print(f"Modulus calculated at {modulus_opt} MPa")
+    # logger.info(f"Modulus calculated at {modulus_opt} MPa")
+    
+    # tend = time.time()
+    # t_calculation = tend - tstart
+    # if t_calculation < 60.0:
+    #     print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
+    # elif t_calculation >= 60.0 and t_calculation < 360.0:
+    #     print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
+    # else:
+    #     print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
+    
+    ### Save the results in a .result file
     modulus_opt = result.x
-    print(f"Modulus calculated at {modulus_opt} MPa")
+    stiffness_opt = result.fun
+    # print(f"Modulus calculated at {modulus_opt} MPa")
     logger.info(f"Modulus calculated at {modulus_opt} MPa")
     
     tend = time.time()
     t_calculation = tend - tstart
-    if t_calculation < 60.0:
-        print(f"\n>> Calculation time:\t{t_calculation:.2f} sec")
-    elif t_calculation >= 60.0 and t_calculation < 360.0:
-        print(f"\n>> Calculation time:\t{t_calculation/60.0:.2f} min")
-    else:
-        print(f"\n>> Calculation time:\t{t_calculation/3600.0:.2f} hrs")
+    
+    # Define the filename with your desired custom extension
+    job_name = os.path.basename(params['geo_target_file']).replace('.stl','')
+    result_filename = f"{job_name}.result"
+    result_filename = os.path.join(params['results_directory'], result_filename)
+    
+    # The content you want to write to the file
+    result_content = f"Job:\t{job_name}\n" \
+                    f"Modulus:\t{modulus_opt} MPa\n" \
+                    f"Target Stiffness:\t{params['target_stiffness']} N/mm\n" \
+                    f"Abs Stiffness Error:\t{stiffness_opt} N/mm\n" \
+                    f"Calculation Time:\t{t_calculation / 60.0} min"
+    
+    # Open the file in write mode
+    try:
+        with open(result_filename, 'w') as file:
+            file.write(result_content)
+        logger.info(f"File '{result_filename}' created successfully.")
+    except IOError as e:
+        logger.error(f"Error writing to file: {e}")
     
     # PLOT
     fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(16, 6), dpi=300)
