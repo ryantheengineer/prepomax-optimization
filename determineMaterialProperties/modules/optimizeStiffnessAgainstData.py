@@ -95,7 +95,7 @@ def estimate_preload_displacement(target_stl):
     avg_diff_support = (diff_l_support + diff_r_support) / 2
     max_diff_support = max([diff_l_support, diff_r_support])
     
-    preload_step_displacement = 0.15
+    preload_step_displacement = 1.5
     preload_displacement = diff_anvil + max_diff_support + preload_step_displacement
     # preload_displacement = diff_anvil + avg_diff_support + preload_step_displacement
     print(f"Estimated preload_displacement:\t{preload_displacement}")
