@@ -99,3 +99,10 @@ class CalculiXRunner:
         #                 new_name=os.path.basename(self.geo_source_file))
 
         self.run()
+        
+    def regenerate_run_no_geo_change(self):
+        if self.pmx_file is None or self.geo_source_file is None:
+            raise Exception(
+                "Missing .pmx file or geometry source file")
+            
+        self.run()

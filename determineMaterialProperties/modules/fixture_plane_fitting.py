@@ -373,7 +373,9 @@ def create_model(fixture_scan_path, expected_planes, visualization=True, verbose
     return all_plane_models, all_inlier_clouds, aligned_pcd, R_pca, R_90X, R_flip, centroid
 
 if __name__ == "__main__":
-    fixture_scan_path = "E:/Fixture Scans/X2_1_Fixture.stl"
+    fixture_scan_path = "E:/Fixture Scans/2_3_Test_setup_edited.stl"
+    # fixture_scan_path = "E:/Fixture Scans/2_3_Test_setup_raw_scan.stl"
+    # fixture_scan_path = "E:/Fixture Scans/X2_1_Fixture.stl"
     specimen_scan_path = "E:/Fixture Scans/X2_positive_quad.stl"
     output_path = "E:/Fixture Scans/X2_Test1.stl"
     

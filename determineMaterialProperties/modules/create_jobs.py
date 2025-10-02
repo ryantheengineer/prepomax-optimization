@@ -57,7 +57,8 @@ def create_jobs(poisson):
     scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
     prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
-    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder)
+    visualization=True
+    create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder, visualization=visualization)
     
     input("Pausing here to allow manual quad remeshing... Press Enter to continue")
     input("Press Enter to confirm that all test mesh files have had quad remesh applied to them.")
