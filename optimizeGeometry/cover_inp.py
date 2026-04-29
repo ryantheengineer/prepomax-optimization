@@ -6,18 +6,27 @@ All dimensions in millimetres (1 inch = 25.4 mm).
 GRID_SPACING  — design variable grid pitch (76.2 mm = 3 in)
 MESH_SPACING  — FEA triangle target size   (25.4 mm = 1 in)
 
-Symmetry: mesh and DVs are symmetric about YZ (X=0) by construction.
-DVs defined for ix>=0 only; lip built from right side and mirrored.
+Lip construction
+----------------
+The lip is built from the FREE EDGES of the main face mesh — edges that
+belong to only one triangle and lie on the outer arc boundary. This is
+topologically exact: every arc boundary edge of the main face gets a lip
+quad, with no geometric detection or tolerance issues. Sewing the shape
+before triangulation ensures no T-junctions in the main face mesh.
 
-Load patch: circular region centred at (0, LOAD_CENTER_Z) in XZ plane,
-radius LOAD_RADIUS. Total force LOAD_FORCE_N applied in -Y direction,
-distributed across patch nodes weighted by tributary area.
+Symmetry: DVs defined for ix>=0 only; lip mirrored from right side.
+
+Perturbation: 0 to +PERTURB_MAX (positive only), reflecting the
+real-world constraint that the cover is pressed outward from the mold.
+
+Lip intermediate nodes: linearly interpolated between perturbed top
+and fixed bottom — no independent kinking.
 """
 
 import numpy as np
 from OCP.BOPAlgo import BOPAlgo_Splitter
 from OCP.TopTools import TopTools_ListOfShape
-from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_Sewing
 from OCP.gp import gp_Pln, gp_Ax3, gp_Pnt, gp_Dir
 from OCP.TopAbs import TopAbs_FACE
 from OCP.TopExp import TopExp_Explorer
@@ -27,7 +36,7 @@ from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from cadquery import Edge, Wire, Face, Vector
 
 # =============================================================================
-# PARAMETERS  (all in mm unless noted)
+# PARAMETERS  (all in mm)
 # =============================================================================
 ARC1_ORIG = dict(cx=0.0,       cz=787.4,    r=1778.0)
 ARC2_ORIG = dict(cx=184.658,   cz=-623.062, r=355.6)
@@ -39,14 +48,14 @@ ARC3_OFF  = dict(cx=-5315.204, cz=1572.26,  r=6302.502)
 GRID_SPACING  = 15.0    # mm (= 3 in) — design variable grid pitch
 MESH_SPACING  = 5.0    # mm (= 1 in) — FEA triangle target size
 LIP_HEIGHT    = 50.8    # mm (= 2 in)
-PERTURB_RANGE = 5.0    # mm (= 1 in) — ± DV range
+PERTURB_MAX   = 25.4    # mm (= 1 in) — max outward (+Y) perturbation
 RANDOM_SEED   = 42
 OUTPUT_INP    = "cover_perturbed.inp"
 
-# Load patch — circular region viewed along -Y
-LOAD_CENTER_Z = -500.0  # mm — Z position of load centre (X is always 0)
-LOAD_RADIUS   = 150.0   # mm — radius of load circle in XZ plane
-LOAD_FORCE_N  = 200.0   # N  — total applied force in -Y direction
+# Load patch
+LOAD_CENTER_Z = -500.0  # mm
+LOAD_RADIUS   = 150.0   # mm
+LOAD_FORCE_N  = 200.0   # N in -Y direction
 
 # =============================================================================
 # GEOMETRY HELPERS
@@ -88,10 +97,11 @@ def make_dv_grid(rng):
     dv = {}
     for ix in range(0, ix_max+1):
         for iz in range(iz_min, iz_max+1):
-            dv[(ix,iz)] = rng.uniform(-PERTURB_RANGE, PERTURB_RANGE)
+            dv[(ix,iz)] = rng.uniform(0.0, PERTURB_MAX)   # positive only
     return dv
 
 def bilinear_interp(x, z, dv_grid):
+    """Symmetric bilinear interpolation — mirrors negative ix to positive."""
     s=GRID_SPACING
     ix0=int(np.floor(x/s)); ix1=ix0+1
     iz0=int(np.floor(z/s)); iz1=iz0+1
@@ -148,21 +158,24 @@ def build_main_face():
 # TRIANGULATE MAIN FACE
 # =============================================================================
 def triangulate_shape(shape):
+    # Sew before triangulating to force compatible meshes on shared edges,
+    # eliminating T-junction gaps at arc/grid boundary intersections.
+    sewing = BRepBuilderAPI_Sewing(0.001)
+    sewing.Add(shape); sewing.Perform()
+    shape = sewing.SewedShape()
     BRepMesh_IncrementalMesh(shape, MESH_SPACING, False, 0.5)
     node_map={}; nodes=[]; tris=[]
     face_exp=TopExp_Explorer(shape, TopAbs_FACE)
     while face_exp.More():
         face=TopoDS.Face_s(face_exp.Current())
-        loc=face.Location()
-        tri=BRep_Tool.Triangulation_s(face,loc)
+        loc=face.Location(); tri=BRep_Tool.Triangulation_s(face,loc)
         if tri is not None:
             face_nids=[]
             for j in range(1,tri.NbNodes()+1):
                 pt=tri.Node(j)
                 key=(round(pt.X(),3),round(pt.Y(),3),round(pt.Z(),3))
                 if key not in node_map:
-                    node_map[key]=len(nodes)+1
-                    nodes.append(list(key))
+                    node_map[key]=len(nodes)+1; nodes.append(list(key))
                 face_nids.append(node_map[key])
             for j in range(1,tri.NbTriangles()+1):
                 t=tri.Triangle(j); n1,n2,n3=t.Get()
@@ -171,152 +184,156 @@ def triangulate_shape(shape):
     return node_map, nodes, tris
 
 # =============================================================================
-# BUILD LIP — RIGHT SIDE ONLY, THEN MIRROR
+# BUILD LIP FROM FREE EDGES — topologically exact, no geometric detection
 # =============================================================================
 def build_lip_mesh(node_map, nodes, tris):
+    """
+    Build the lip by extruding the free edges of the main face mesh.
+
+    Free edges (belonging to exactly one triangle) on the outer arc are
+    exactly the edges that need lip coverage. This approach is topologically
+    exact — no on_outer_arc() tolerance check, no missing edges, no gaps.
+
+    For each free arc edge (na, nb):
+      - The two top nodes (na, nb) already exist in node_map at Y=0
+      - Add mirrored nodes at (-x, 0, z) for the left side (X<0 edges)
+      - Add rows of nodes below each top node down to Y=-LIP_HEIGHT
+      - Connect with quads
+
+    Symmetry: right-side (X>=0) edges are processed; left-side edges
+    are their exact mirrors and share the same lip column data.
+    """
     n_rows = max(1, int(np.ceil(LIP_HEIGHT / MESH_SPACING)))
     y_fracs = [i/n_rows for i in range(n_rows+1)]
 
-    right_boundary = []
-    for (x,y,z), nid in node_map.items():
-        if x >= -0.01 and abs(y) < 0.1 and on_outer_arc(x, z):
-            right_boundary.append((x, z, nid))
-    right_boundary.sort(key=lambda b: b[0])
+    # Find free edges on the outer arc (not back edge)
+    edge_count={}
+    for n1,n2,n3 in tris:
+        for e in [(min(n1,n2),max(n1,n2)),(min(n2,n3),max(n2,n3)),(min(n1,n3),max(n1,n3))]:
+            edge_count[e]=edge_count.get(e,0)+1
+
+    arc_edges = []   # (na, nb) free edges on outer arc
+    for (na,nb),c in edge_count.items():
+        if c==1:
+            xa,ya,za=nodes[na-1]; xb,yb,zb=nodes[nb-1]
+            if abs(za)>1 or abs(zb)>1:  # exclude back edge at Z≈0
+                arc_edges.append((na,nb))
 
     def get_or_add(x, y, z):
         key=(round(x,3), round(y,3), round(z,3))
         if key not in node_map:
-            node_map[key]=len(nodes)+1
-            nodes.append([x, y, z])
+            node_map[key]=len(nodes)+1; nodes.append([x,y,z])
         return node_map[key]
 
-    cols_right=[]; cols_left=[]
-    for x, z, top_nid_r in right_boundary:
-        col_r=[top_nid_r]
-        col_l=[get_or_add(-x, 0.0, z)]
-        for r in range(1, n_rows+1):
-            y_r=-y_fracs[r]*LIP_HEIGHT
-            col_r.append(get_or_add( x, y_r, z))
-            col_l.append(get_or_add(-x, y_r, z))
-        cols_right.append(col_r)
-        cols_left.append(col_l)
+    # For each arc edge, build a lip quad strip downward.
+    # The top nodes already exist. We add intermediate + bottom nodes.
+    # For X<0 edges: mirror to X>0 for symmetry of lip columns.
+    for na, nb in arc_edges:
+        xa,ya,za = nodes[na-1]
+        xb,yb,zb = nodes[nb-1]
 
-    for i in range(len(cols_right)-1):
-        cr0=cols_right[i]; cr1=cols_right[i+1]
-        cl0=cols_left[i];  cl1=cols_left[i+1]
-        x0r,z0r,_=right_boundary[i]; x1r,z1r,_=right_boundary[i+1]
-        if np.hypot(x1r-x0r,z1r-z0r) > MESH_SPACING*4: continue
-        for r in range(n_rows):
-            n00r=cr0[r]; n10r=cr1[r]; n11r=cr1[r+1]; n01r=cr0[r+1]
-            if len({n00r,n10r,n11r,n01r})>=3:
-                tris.append((n00r,n10r,n11r)); tris.append((n00r,n11r,n01r))
-            n00l=cl0[r]; n10l=cl1[r]; n11l=cl1[r+1]; n01l=cl0[r+1]
-            if len({n00l,n10l,n11l,n01l})>=3:
-                tris.append((n00l,n11l,n10l)); tris.append((n00l,n01l,n11l))
+        # Build column of node IDs for each endpoint: top -> bottom
+        def col(x, z, top_nid):
+            c = [top_nid]
+            for r in range(1, n_rows+1):
+                c.append(get_or_add(x, -y_fracs[r]*LIP_HEIGHT, z))
+            return c
 
-    return len(right_boundary)
+        col_a = col(xa, za, na)
+        col_b = col(xb, zb, nb)
+
+        # Right-side quad: na side and nb side
+        if xa >= -0.01 or xb >= -0.01:
+            for r in range(n_rows):
+                n00=col_a[r]; n10=col_b[r]; n11=col_b[r+1]; n01=col_a[r+1]
+                if len({n00,n10,n11,n01})>=3:
+                    tris.append((n00,n10,n11)); tris.append((n00,n11,n01))
+
+        # Left-side mirror: only if this is a right-side edge
+        if xa >= -0.01 and xb >= -0.01 and (abs(xa)>0.01 or abs(xb)>0.01):
+            # Mirror to X<0
+            mna = get_or_add(-xa, ya, za)
+            mnb = get_or_add(-xb, yb, zb)
+            mcol_a = col(-xa, za, mna)
+            mcol_b = col(-xb, zb, mnb)
+            for r in range(n_rows):
+                n00=mcol_a[r]; n10=mcol_b[r]; n11=mcol_b[r+1]; n01=mcol_a[r+1]
+                if len({n00,n10,n11,n01})>=3:
+                    # Reversed winding for correct normals on left side
+                    tris.append((n00,n11,n10)); tris.append((n00,n01,n11))
+
+        # Centre edge (xa=0 or xb=0): only right-side quads, no mirror needed
+        # (already handled above since one endpoint IS the mirror)
+
+    return len(arc_edges)
 
 # =============================================================================
 # APPLY PERTURBATIONS
 # =============================================================================
 def apply_perturbations(nodes, dv_grid):
     """
-    Perturb Y coordinates:
-      - Lip bottom (Y = -LIP_HEIGHT): fixed exactly, never moved.
-      - Lip intermediate rows: linearly interpolated between their top node
-        (which gets the DV field perturbation) and the fixed bottom. This
-        keeps the lip as a ruled surface with no independent kinking.
-      - All other nodes (main face): perturbed by bilinear DV field.
+    Perturb Y of all free nodes via symmetric bilinear interpolation.
 
-    Lip node identification: nodes whose initial Y is strictly between
-    -LIP_HEIGHT and 0 (exclusive) are lip intermediate nodes.
-    Their X,Z match a lip top node (same X,Z, Y=0) and a lip bottom
-    node (same X,Z, Y=-LIP_HEIGHT).
+    Pass 1: perturb main face nodes (Y≈0) and record top_y for lip columns.
+    Pass 2: linearly interpolate lip intermediate nodes between their
+            perturbed top and fixed bottom — no independent kinking.
+    Lip bottom (Y=-LIP_HEIGHT): always fixed exactly.
     """
-    nodes_arr = list(nodes)  # work in place
+    top_y = {}   # (round(x,3), round(z,3)) -> perturbed Y for top nodes
+    n_interp=0; n_fixed=0
 
-    # First pass: perturb all non-lip nodes (Y=0 and lip bottom)
-    # Build a lookup: (round(x,3), round(z,3)) -> perturbed Y for top nodes
-    top_y = {}   # for lip top nodes after perturbation
-    n_interp = 0; n_fixed = 0
-
-    for i,(x,y,z) in enumerate(nodes_arr):
-        if abs(y + LIP_HEIGHT) < 0.5:          # lip bottom — fix exactly
+    # Pass 1: main face and lip top
+    for i,(x,y,z) in enumerate(nodes):
+        if abs(y+LIP_HEIGHT)<0.5:
             nodes[i][1] = -LIP_HEIGHT
-            n_fixed += 1
-        elif abs(y) < 0.5:                      # main face / lip top (Y≈0)
+            n_fixed+=1
+        elif abs(y)<0.5:
             dy = bilinear_interp(x, z, dv_grid)
             nodes[i][1] = y + dy
             top_y[(round(x,3), round(z,3))] = nodes[i][1]
-            n_interp += 1
+            n_interp+=1
 
-    # Second pass: linearly interpolate lip intermediate nodes
+    # Pass 2: lip intermediate rows — linear interpolation between top and bottom
     for i,(x,y,z) in enumerate(nodes):
-        if -LIP_HEIGHT + 0.5 < y < -0.5:       # lip intermediate row
-            key  = (round(x,3),      round(z,3))
-            mkey = (round(-x,3),     round(z,3))  # mirror key (symmetric)
+        if -LIP_HEIGHT+0.5 < y < -0.5:
+            key  = (round(x,3),  round(z,3))
+            mkey = (round(-x,3), round(z,3))
             if key in top_y:
                 y_top = top_y[key]
             elif mkey in top_y:
-                y_top = top_y[mkey]   # use mirrored value (same by symmetry)
+                y_top = top_y[mkey]
             else:
-                # Fallback: compute from DV field directly at this X,Z
                 y_top = bilinear_interp(x, z, dv_grid)
             frac = abs(y) / LIP_HEIGHT
-            nodes[i][1] = y_top * (1.0 - frac) + (-LIP_HEIGHT) * frac
-            n_interp += 1
+            nodes[i][1] = y_top*(1-frac) + (-LIP_HEIGHT)*frac
+            n_interp+=1
 
     return n_interp, n_fixed
 
 # =============================================================================
-# LOAD PATCH — CIRCULAR SELECTION AND AREA-WEIGHTED FORCES
+# LOAD PATCH
 # =============================================================================
 def triangle_area_3d(p0, p1, p2):
     v1=np.array(p1)-np.array(p0); v2=np.array(p2)-np.array(p0)
     return 0.5*np.linalg.norm(np.cross(v1,v2))
 
 def compute_load_patch(nodes, tris, load_center_z, load_radius, total_force_n):
-    """
-    Select main-face nodes within load_radius of (0, load_center_z) in XZ,
-    compute area-weighted concentrated forces in -Y.
-
-    Only triangles with ALL THREE nodes inside the circle contribute area,
-    ensuring the total is well-defined regardless of how the circle clips
-    element edges. Each node gets 1/3 of each fully-interior triangle's area.
-
-    Returns:
-      selected_nids : sorted list of 1-based node IDs
-      forces        : dict nid -> force value in N (negative = -Y direction)
-      patch_area    : total tributary area in mm²
-    """
-    nodes_arr = np.array(nodes)
-
-    # Select nodes: within radius in XZ plane, not on lip bottom
-    in_circle = {}
+    nodes_arr=np.array(nodes)
+    in_circle={}
     for i,(x,y,z) in enumerate(nodes_arr):
-        if y < -LIP_HEIGHT * 0.5:   # skip lip nodes
-            continue
-        if np.hypot(x, z - load_center_z) <= load_radius:
-            in_circle[i+1] = True   # 1-based nid
-
-    # Tributary area: only from triangles fully inside the circle
-    tributary = {nid: 0.0 for nid in in_circle}
+        if y < -LIP_HEIGHT*0.5: continue
+        if np.hypot(x, z-load_center_z) <= load_radius:
+            in_circle[i+1]=True
+    tributary={nid:0.0 for nid in in_circle}
     for n1,n2,n3 in tris:
         if n1 in in_circle and n2 in in_circle and n3 in in_circle:
-            area = triangle_area_3d(nodes_arr[n1-1], nodes_arr[n2-1], nodes_arr[n3-1])
-            tributary[n1] += area/3.0
-            tributary[n2] += area/3.0
-            tributary[n3] += area/3.0
-
-    # Drop nodes with no tributary area (on boundary but no interior triangle)
-    tributary = {nid: a for nid,a in tributary.items() if a > 0.0}
+            area=triangle_area_3d(nodes_arr[n1-1],nodes_arr[n2-1],nodes_arr[n3-1])
+            tributary[n1]+=area/3; tributary[n2]+=area/3; tributary[n3]+=area/3
+    tributary={nid:a for nid,a in tributary.items() if a>0}
     if not tributary:
-        raise ValueError(
-            f"No interior triangles found within radius {load_radius} mm "
-            f"of Z={load_center_z}. Increase LOAD_RADIUS or adjust LOAD_CENTER_Z.")
-
-    total_area = sum(tributary.values())
-    forces = {nid: -total_force_n * a / total_area for nid,a in tributary.items()}
+        raise ValueError(f"No triangles in load radius {load_radius} at Z={load_center_z}")
+    total_area=sum(tributary.values())
+    forces={nid:-total_force_n*a/total_area for nid,a in tributary.items()}
     return sorted(tributary.keys()), forces, total_area
 
 # =============================================================================
@@ -325,37 +342,20 @@ def compute_load_patch(nodes, tris, load_center_z, load_radius, total_force_n):
 def write_inp(filepath, nodes, tris, load_center_z, load_radius, total_force_n):
     selected_nids, forces, patch_area = compute_load_patch(
         nodes, tris, load_center_z, load_radius, total_force_n)
-
-    print(f"  Load patch: {len(selected_nids)} nodes, "
-          f"area = {patch_area:.0f} mm²,  "
-          f"avg pressure = {total_force_n/patch_area:.4f} N/mm²")
+    print(f"  Load patch: {len(selected_nids)} nodes, area={patch_area:.0f} mm²")
 
     with open(filepath,'w') as f:
-        f.write("** Window Well Cover — Perturbed Geometry (mm)\n")
-        f.write(f"** Load: {total_force_n:.1f} N over {len(selected_nids)} nodes "
-                f"at Z={load_center_z:.1f}, R={load_radius:.1f} mm\n**\n")
-
-        # Nodes — PrePoMax uses *Node (no NSET on this line)
+        f.write("** Window Well Cover — Perturbed Geometry (mm)\n**\n")
         f.write("*Node\n")
-        for i,(x,y,z) in enumerate(nodes, start=1):
+        for i,(x,y,z) in enumerate(nodes,start=1):
             f.write(f"{i:6d}, {x:14.4f}, {y:14.4f}, {z:14.4f}\n")
-
-        # Elements
         f.write("**\n*Element, Type=S3, Elset=ELSET_ALL\n")
-        for i,(n1,n2,n3) in enumerate(tris, start=1):
+        for i,(n1,n2,n3) in enumerate(tris,start=1):
             f.write(f"{i:6d}, {n1:6d}, {n2:6d}, {n3:6d}\n")
-
-        # Load node set — 16 per line, trailing comma, matching PrePoMax format
-        f.write("**\n** Node sets\n**\n")
-        f.write("*Nset, Nset=Node_Set-1\n")
-        for k in range(0, len(selected_nids), 16):
-            chunk = selected_nids[k:k+16]
-            f.write(", ".join(str(n) for n in chunk) + ",\n")
-
-        # Concentrated loads, DOF 2 = Y
-        f.write("**\n** Area-weighted concentrated forces — "
-                f"total {total_force_n:.1f} N in -Y\n**\n")
-        f.write("*Cload\n")
+        f.write("**\n** Node sets\n**\n*Nset, Nset=Node_Set-1\n")
+        for k in range(0,len(selected_nids),16):
+            f.write(", ".join(str(n) for n in selected_nids[k:k+16])+",\n")
+        f.write("**\n*Cload\n")
         for nid in selected_nids:
             f.write(f"{nid:6d}, 2, {forces[nid]:14.6f}\n")
 
@@ -368,7 +368,7 @@ def main():
 
     print("Window Well Cover — .inp Generator (mm)")
     print(f"  Grid: {GRID_SPACING} mm   Mesh: {MESH_SPACING} mm   Lip rows: {n_lip_rows}")
-    print(f"  Load: {LOAD_FORCE_N:.0f} N at Z={LOAD_CENTER_Z:.0f}, R={LOAD_RADIUS:.0f} mm")
+    print(f"  Perturbation: 0 to +{PERTURB_MAX} mm (positive only)")
     print()
 
     print("Building partitioned main face...")
@@ -378,16 +378,16 @@ def main():
     node_map, nodes, tris = triangulate_shape(main_shape)
     print(f"  Main face: {len(nodes)} nodes, {len(tris)} triangles")
 
-    print("Building lip (right side + mirror)...")
-    n_bnd = build_lip_mesh(node_map, nodes, tris)
-    print(f"  Right boundary nodes: {n_bnd}")
+    print("Building lip from free edges (topologically exact)...")
+    n_arc_edges = build_lip_mesh(node_map, nodes, tris)
+    print(f"  Arc free edges covered: {n_arc_edges}")
     print(f"  Total: {len(nodes)} nodes, {len(tris)} triangles")
 
     print("Building symmetric DV grid...")
     dv_grid = make_dv_grid(rng)
     print(f"  Design variables (ix>=0): {len(dv_grid)}")
 
-    print(f"Applying perturbations (±{PERTURB_RANGE} mm)...")
+    print(f"Applying perturbations (0 to +{PERTURB_MAX} mm)...")
     n_interp, n_fixed = apply_perturbations(nodes, dv_grid)
     print(f"  Interpolated: {n_interp},  Fixed: {n_fixed}")
 
