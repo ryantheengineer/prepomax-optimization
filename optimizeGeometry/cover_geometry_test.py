@@ -1,255 +1,277 @@
 """
 Window Well Cover — Geometry Generator
 =======================================
-Generates the cover surface geometry as a STEP file suitable for import
-into PrePoMax or any 3D visualizer (FreeCAD, CAD Assistant, etc.).
+Generates the cover surface geometry as a STEP file for import into
+PrePoMax or any 3D visualizer (FreeCAD, CAD Assistant, etc.).
 
-Geometry description
+Implementation notes
 --------------------
-The cover profile is defined in the XZ plane (X = lateral, Z = vertical)
-and is symmetric across the YZ plane (X = 0).
+BOPAlgo_Splitter is used instead of BRepFeat_SplitShape. SplitShape
+requires PCurves on the target face and silently ignores edges that
+coincide with face boundaries (Z=0 is both a grid line and the back
+boundary edge). BOPAlgo_Splitter takes entire tool faces (cutting planes
+and ruled surfaces) and handles all of this robustly.
 
-The profile consists of three tangent arcs offset 1 inch outward from the
-original design arcs (radii each increased by 1 inch; centers unchanged,
-which preserves internal tangency exactly):
+Grid cutting tools are infinite planes (constant X or constant Z).
+Z=0 is skipped since it coincides with the face boundary — it is
+already present as a topological edge.
 
-  Arc 1  r = 71"      center (  0.00,  31.00)  — large central arc
-  Arc 2  r = 15"      center (  7.27, -24.53)  — tight knuckle transition
-  Arc 3  r = 248.13"  center (-209.26, 61.90)  — near-flat outer section
+Arc split line tools are thin ruled surfaces extruded ±10" in Y through
+each original arc segment. The intersection of these with the Y=0 main
+face produces the arc split edges.
 
-All three arcs are internally tangent (each smaller arc sits inside the
-adjacent larger one). Tangent joint points are computed analytically.
+The result is sewn with the lip faces into a single shell.
 
-At the plane of symmetry (X = 0), Arc 1 is tangent to a horizontal line,
-placing the front apex at (0, 0, -40) in 3D (X, Y, Z).
-
-The profile is closed by a straight back edge along Z = 0 connecting the
-two mirrored Arc 3 endpoints.
-
-The main cover surface is a flat shell at Y = 0 bounded by the full profile.
-
-The lip is a vertical flange of height LIP_HEIGHT swept along all arc edges
-(all profile edges except the back straight line), dropping in the -Y direction.
-Lip ruled surfaces are constructed using analytically-computed arc midpoints
-to ensure the lip follows the curved profile exactly.
-
-Coordinate system (3D)
------------------------
-  X — lateral (left/right), symmetric about X = 0
-  Y — depth (0 = main surface plane, -LIP_HEIGHT = bottom of lip)
-  Z — vertical (0 = back edge / window well rim, negative = downward/forward)
-
-Units: inches throughout.
-
-Output
-------
-  cover.step  — STEP AP214 shell (main face + 6 lip faces)
+Coordinate system: X=lateral, Y=depth (0=surface, -LIP=lip bottom),
+Z=vertical (0=back/rim, negative=forward/down). Units: inches.
 """
 
 import numpy as np
 import cadquery as cq
-from cadquery import Edge, Wire, Face, Shell, Vector
+from cadquery import Edge, Wire, Face, Vector
+
+from OCP.BOPAlgo import BOPAlgo_Splitter
+from OCP.TopTools import TopTools_ListOfShape
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_Sewing
+from OCP.gp import gp_Pln, gp_Ax3, gp_Pnt, gp_Dir
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL
+from OCP.TopExp import TopExp_Explorer
 
 # =============================================================================
 # PARAMETERS
 # =============================================================================
 
-# Arc definitions: (center_x, center_z, radius) — inches, XZ plane
-# These are the original design arcs offset 1" outward (radii += 1).
-ARC1 = dict(cx=0.0,     cz=31.0,    r=71.0)
-ARC2 = dict(cx=7.27,    cz=-24.53,  r=15.0)
-ARC3 = dict(cx=-209.26, cz=61.9,    r=248.13)
+ARC1_ORIG = dict(cx=0.0,     cz=31.0,    r=70.0)
+ARC2_ORIG = dict(cx=7.27,    cz=-24.53,  r=14.0)
+ARC3_ORIG = dict(cx=-209.26, cz=61.9,    r=247.13)
 
-# Lip drop in -Y direction (inches)
-LIP_HEIGHT = 2.0
+ARC1_OFF  = dict(cx=0.0,     cz=31.0,    r=71.0)
+ARC2_OFF  = dict(cx=7.27,    cz=-24.53,  r=15.0)
+ARC3_OFF  = dict(cx=-209.26, cz=61.9,    r=248.13)
 
-# Output file path
-OUTPUT_PATH = "cover.step"
+GRID_SPACING = 3.0   # inches — change for different grid density
+LIP_HEIGHT   = 2.0   # inches
+OUTPUT_PATH  = "cover.step"
 
 # =============================================================================
-# DERIVED GEOMETRY
+# GEOMETRY UTILITIES
 # =============================================================================
 
 def _tangent_point(a, b):
-    """
-    Compute the internal tangency point between two circles a and b.
-    For internally tangent circles (one inside the other), the tangent point
-    lies on the line between centers at radius r from the larger circle's center.
-    Centers are unchanged by equal radius offsets, so tangency is preserved.
-    """
-    cx1, cz1, r1 = a['cx'], a['cz'], a['r']
-    cx2, cz2, r2 = b['cx'], b['cz'], b['r']
-    d = np.hypot(cx2 - cx1, cz2 - cz1)
-    ux = (cx2 - cx1) / d
-    uz = (cz2 - cz1) / d
-    if r1 >= r2:
-        return (cx1 + r1 * ux, cz1 + r1 * uz)
-    else:
-        return (cx2 - r2 * ux, cz2 - r2 * uz)
+    cx1,cz1,r1=a['cx'],a['cz'],a['r']; cx2,cz2,r2=b['cx'],b['cz'],b['r']
+    d=np.hypot(cx2-cx1,cz2-cz1); ux,uz=(cx2-cx1)/d,(cz2-cz1)/d
+    return (cx1+r1*ux,cz1+r1*uz) if r1>=r2 else (cx2-r2*ux,cz2-r2*uz)
 
+def _arc_midpoint(arc, p0, p1):
+    cx,cz,r=arc['cx'],arc['cz'],arc['r']
+    ts=np.arctan2(p0[1]-cz,p0[0]-cx); te=np.arctan2(p1[1]-cz,p1[0]-cx)
+    diff=(te-ts+np.pi)%(2*np.pi)-np.pi; tm=ts+diff/2
+    return (cx+r*np.cos(tm), cz+r*np.sin(tm))
 
-def _arc_midpoint(arc, pt_start, pt_end):
-    """
-    Return the true midpoint of the short arc on `arc` between pt_start and pt_end.
-    This point is guaranteed to lie on the arc, unlike Edge.Center() which returns
-    the geometric centroid (slightly inside the arc for curved edges).
-    """
-    cx, cz, r = arc['cx'], arc['cz'], arc['r']
-    t_s = np.arctan2(pt_start[1] - cz, pt_start[0] - cx)
-    t_e = np.arctan2(pt_end[1]   - cz, pt_end[0]   - cx)
-    diff = (t_e - t_s + np.pi) % (2 * np.pi) - np.pi   # short-arc signed angle
-    t_mid = t_s + diff / 2.0
-    return (cx + r * np.cos(t_mid), cz + r * np.sin(t_mid))
+def _arc_z0_x(arc):
+    cx,cz,r=arc['cx'],arc['cz'],arc['r']
+    dx=np.sqrt(r**2-cz**2)
+    return cx+dx if cx+dx>0 else cx-dx
 
-
-# Tangent joint points between arcs
-TP12 = _tangent_point(ARC1, ARC2)   # Arc1 / Arc2 joint (right side)
-TP23 = _tangent_point(ARC3, ARC2)   # Arc3 / Arc2 joint (right side)
-
-# Front apex: Arc1 at X=0, tangent horizontal -> radius is vertical -> point below center
-APEX = (0.0, ARC1['cz'] - ARC1['r'])
-
-# Back edge endpoint: Arc3 intersects Z=0 (positive X solution)
-_cx3, _cz3, _r3 = ARC3['cx'], ARC3['cz'], ARC3['r']
-_dx = np.sqrt(_r3**2 - _cz3**2)
-BACK_X = _cx3 + _dx if (_cx3 + _dx) > 0 else _cx3 - _dx
-BACK_CORNER = (BACK_X, 0.0)
-
-# Arc midpoints — computed analytically and stored alongside each arc segment.
-# These are used for both the main surface wire and the lip ruled surfaces,
-# ensuring the lip geometry exactly follows the profile curve.
-MID1 = _arc_midpoint(ARC1, APEX,        TP12)
-MID2 = _arc_midpoint(ARC2, TP12,        TP23)
-MID3 = _arc_midpoint(ARC3, BACK_CORNER, TP23)
-
-
-# =============================================================================
-# GEOMETRY BUILDERS
-# =============================================================================
-
-def _v(xz, y=0.0):
-    """Convert an (x, z) tuple to a cadquery Vector at the given Y depth."""
-    return Vector(xz[0], y, xz[1])
-
-
-def _mx(pt):
-    """Mirror an (x, z) point across the YZ plane (negate X)."""
-    return (-pt[0], pt[1])
-
-
+def _v(xz, y=0.0): return Vector(xz[0], y, xz[1])
+def _mx(pt):       return (-pt[0], pt[1])
 def _make_arc(p0, pm, p1, y=0.0):
-    """
-    Build a cadquery arc Edge through three (x,z) points at a given Y depth.
-    pm must be the true arc midpoint (on the arc curve), not Edge.Center().
-    """
-    return Edge.makeThreePointArc(_v(p0, y), _v(pm, y), _v(p1, y))
+    return Edge.makeThreePointArc(_v(p0,y), _v(pm,y), _v(p1,y))
 
+# =============================================================================
+# DERIVED KEY POINTS
+# =============================================================================
 
-def build_main_surface():
-    """
-    Build the main cover surface as a Face at Y = 0.
+TP12_OFF   = _tangent_point(ARC1_OFF, ARC2_OFF)
+TP23_OFF   = _tangent_point(ARC3_OFF, ARC2_OFF)
+APEX_OFF   = (0.0, ARC1_OFF['cz'] - ARC1_OFF['r'])
+BACK_X_OFF = _arc_z0_x(ARC3_OFF)
+BACK_OFF   = (BACK_X_OFF, 0.0)
+MID1_OFF   = _arc_midpoint(ARC1_OFF, APEX_OFF, TP12_OFF)
+MID2_OFF   = _arc_midpoint(ARC2_OFF, TP12_OFF, TP23_OFF)
+MID3_OFF   = _arc_midpoint(ARC3_OFF, BACK_OFF, TP23_OFF)
 
-    Boundary wire sequence (closed loop):
-      APEX -> Arc1R -> TP12R -> Arc2R -> TP23R -> Arc3R -> BACK_CORNER_R
-           -> back line ->
-      BACK_CORNER_L -> Arc3L -> TP23L -> Arc2L -> TP12L -> Arc1L -> APEX
+TP12_ORIG   = _tangent_point(ARC1_ORIG, ARC2_ORIG)
+TP23_ORIG   = _tangent_point(ARC3_ORIG, ARC2_ORIG)
+APEX_ORIG   = (0.0, ARC1_ORIG['cz'] - ARC1_ORIG['r'])
+BACK_X_ORIG = _arc_z0_x(ARC3_ORIG)
+BACK_ORIG   = (BACK_X_ORIG, 0.0)
+MID1_ORIG   = _arc_midpoint(ARC1_ORIG, APEX_ORIG, TP12_ORIG)
+MID2_ORIG   = _arc_midpoint(ARC2_ORIG, TP12_ORIG, TP23_ORIG)
+MID3_ORIG   = _arc_midpoint(ARC3_ORIG, BACK_ORIG, TP23_ORIG)
 
-    Returns (face, arc_segments) where arc_segments is a list of dicts,
-    each containing the p0/pm/p1 points for a single arc edge.
-    These are reused by build_lip() to avoid relying on Edge.Center().
-    """
-    # Right-side arc edges
-    arc1R = _make_arc(APEX,        MID1,          TP12)
-    arc2R = _make_arc(TP12,        MID2,          TP23)
-    arc3R = _make_arc(TP23,        MID3,          BACK_CORNER)
+# =============================================================================
+# BUILD FUNCTIONS
+# =============================================================================
 
-    # Left-side arc edges (all points mirrored in X, direction reversed)
-    arc3L = _make_arc(_mx(BACK_CORNER), _mx(MID3), _mx(TP23))
-    arc2L = _make_arc(_mx(TP23),        _mx(MID2), _mx(TP12))
-    arc1L = _make_arc(_mx(TP12),        _mx(MID1), _mx(APEX))
-
-    # Back straight edge at Z=0, Y=0
-    back_edge = Edge.makeLine(_v(BACK_CORNER), _v(_mx(BACK_CORNER)))
-
-    boundary_wire = Wire.assembleEdges([
-        arc1R, arc2R, arc3R,
-        back_edge,
-        arc3L, arc2L, arc1L,
+def build_main_face():
+    """Build the outer-boundary flat face at Y=0."""
+    wire = Wire.assembleEdges([
+        _make_arc(APEX_OFF,       MID1_OFF,       TP12_OFF),
+        _make_arc(TP12_OFF,       MID2_OFF,       TP23_OFF),
+        _make_arc(TP23_OFF,       MID3_OFF,       BACK_OFF),
+        Edge.makeLine(_v(BACK_OFF), _v(_mx(BACK_OFF))),
+        _make_arc(_mx(BACK_OFF),  _mx(MID3_OFF),  _mx(TP23_OFF)),
+        _make_arc(_mx(TP23_OFF),  _mx(MID2_OFF),  _mx(TP12_OFF)),
+        _make_arc(_mx(TP12_OFF),  _mx(MID1_OFF),  _mx(APEX_OFF)),
     ])
+    if not wire.IsClosed():
+        raise RuntimeError("Outer boundary wire did not close.")
+    return Face.makeFromWires(wire).wrapped
 
-    if not boundary_wire.IsClosed():
-        raise RuntimeError("Boundary wire is not closed — check arc endpoint continuity.")
 
-    face = Face.makeFromWires(boundary_wire)
+def build_tool_faces():
+    """
+    Build all cutting tool faces for BOPAlgo_Splitter.
 
-    # Store the defining points for each arc segment (used by build_lip)
-    arc_segments = [
-        dict(p0=APEX,              pm=MID1,      p1=TP12),
-        dict(p0=TP12,              pm=MID2,      p1=TP23),
-        dict(p0=TP23,              pm=MID3,      p1=BACK_CORNER),
-        dict(p0=_mx(BACK_CORNER),  pm=_mx(MID3), p1=_mx(TP23)),
-        dict(p0=_mx(TP23),         pm=_mx(MID2), p1=_mx(TP12)),
-        dict(p0=_mx(TP12),         pm=_mx(MID1), p1=_mx(APEX)),
+    Grid tools: infinite planes at constant X and constant Z.
+      X=0 is always included (centre line).
+      Z=0 is SKIPPED — it coincides with the back boundary edge and is
+      already present in the topology. Starting from Z=-GRID_SPACING
+      means the first interior horizontal line is one spacing below the rim.
+
+    Arc split tools: thin ruled surfaces extruded ±10" in Y through each
+      original arc segment. Their intersection with the Y=0 main face
+      produces the arc split edges.
+    """
+    def cpf(normal, point, size=300):
+        nx,ny,nz=normal; px,py,pz=point
+        pln=gp_Pln(gp_Ax3(gp_Pnt(px,py,pz),gp_Dir(nx,ny,nz)))
+        return BRepBuilderAPI_MakeFace(pln,-size,size,-size,size).Face()
+
+    def arc_tool(p0, pm, p1, dy=10.0):
+        """Thin ruled surface through arc — intersects Y=0 face along the arc."""
+        top = _make_arc(p0, pm, p1, y= dy)
+        bot = _make_arc(p0, pm, p1, y=-dy)
+        return Face.makeRuledSurface(Wire.assembleEdges([top]),
+                                     Wire.assembleEdges([bot])).wrapped
+
+    tools = []
+
+    # Constant-X planes (vertical grid lines)
+    xl = BACK_X_OFF + GRID_SPACING
+    k = 0
+    while k * GRID_SPACING <= xl:
+        for x in ([0.0] if k == 0 else [k*GRID_SPACING, -k*GRID_SPACING]):
+            tools.append(cpf((1,0,0),(x,0,0)))
+        k += 1
+
+    # Constant-Z planes (horizontal grid lines) — start at k=1 to skip Z=0
+    zl = abs(APEX_OFF[1]) + GRID_SPACING
+    k = 1
+    while k * GRID_SPACING <= zl:
+        tools.append(cpf((0,0,1),(0,0,-k*GRID_SPACING)))
+        k += 1
+
+    grid_count = len(tools)
+
+    # Arc split line tools (original arc profile, both sides)
+    arc_pairs = [
+        (_mx(BACK_OFF),  _mx(MID3_ORIG), _mx(TP23_ORIG)),
+        (_mx(TP23_ORIG), _mx(MID2_ORIG), _mx(TP12_ORIG)),
+        (_mx(TP12_ORIG), _mx(MID1_ORIG), _mx(APEX_ORIG)),
+        (APEX_ORIG,       MID1_ORIG,      TP12_ORIG),
+        (TP12_ORIG,       MID2_ORIG,      TP23_ORIG),
+        (TP23_ORIG,       MID3_ORIG,      BACK_ORIG),
     ]
+    for p0, pm, p1 in arc_pairs:
+        tools.append(arc_tool(p0, pm, p1))
 
-    return face, arc_segments
+    return tools, grid_count, len(arc_pairs)
 
 
-def build_lip(arc_segments):
-    """
-    Build the vertical lip faces by ruling each arc segment down by LIP_HEIGHT in -Y.
+def partition_face(occ_face, tool_faces):
+    """Split the face using BOPAlgo_Splitter with all tool faces at once."""
+    args = TopTools_ListOfShape()
+    args.Append(occ_face)
+    tlist = TopTools_ListOfShape()
+    for t in tool_faces:
+        tlist.Append(t)
+    splitter = BOPAlgo_Splitter()
+    splitter.SetArguments(args)
+    splitter.SetTools(tlist)
+    splitter.Perform()
+    if splitter.HasErrors():
+        raise RuntimeError(f"BOPAlgo_Splitter failed: {splitter.DumpErrorsToString()}")
+    return splitter.Shape()
 
-    Each ruled surface connects the top arc (at Y=0) to an identical arc at
-    Y=-LIP_HEIGHT. Midpoints are taken from arc_segments (analytically computed,
-    lying exactly on the arc) rather than from Edge.Center(), which would place
-    them slightly inside the curve and cause the lip to bow inward.
 
-    Returns a list of Face objects, one per arc segment.
-    """
-    lip_faces = []
-    for seg in arc_segments:
-        p0, pm, p1 = seg['p0'], seg['pm'], seg['p1']
-        top_edge = _make_arc(p0, pm, p1, y=0.0)
-        bot_edge = _make_arc(p0, pm, p1, y=-LIP_HEIGHT)
-        top_wire = Wire.assembleEdges([top_edge])
-        bot_wire = Wire.assembleEdges([bot_edge])
-        lip_faces.append(Face.makeRuledSurface(top_wire, bot_wire))
-    return lip_faces
+def build_lip_faces():
+    """Ruled lip faces from each offset arc edge down by LIP_HEIGHT."""
+    arc_segs = [
+        (APEX_OFF,       MID1_OFF,       TP12_OFF),
+        (TP12_OFF,       MID2_OFF,       TP23_OFF),
+        (TP23_OFF,       MID3_OFF,       BACK_OFF),
+        (_mx(BACK_OFF),  _mx(MID3_OFF),  _mx(TP23_OFF)),
+        (_mx(TP23_OFF),  _mx(MID2_OFF),  _mx(TP12_OFF)),
+        (_mx(TP12_OFF),  _mx(MID1_OFF),  _mx(APEX_OFF)),
+    ]
+    faces = []
+    for p0, pm, p1 in arc_segs:
+        top = _make_arc(p0, pm, p1, y=0.0)
+        bot = _make_arc(p0, pm, p1, y=-LIP_HEIGHT)
+        faces.append(Face.makeRuledSurface(Wire.assembleEdges([top]),
+                                           Wire.assembleEdges([bot])).wrapped)
+    return faces
+
+
+def sew(partitioned, lip_occ_faces, tolerance=0.001):
+    """Sew main surface and lip into one continuous shell."""
+    sewing = BRepBuilderAPI_Sewing(tolerance)
+    sewing.Add(partitioned)
+    for f in lip_occ_faces:
+        sewing.Add(f)
+    sewing.Perform()
+    return sewing.SewedShape()
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
+def _count(shape, topology):
+    n=0; exp=TopExp_Explorer(shape,topology)
+    while exp.More(): n+=1; exp.Next()
+    return n
+
 def main():
     print("Window Well Cover — Geometry Generator")
     print("=" * 45)
-    print(f"  Arc radii (offset +1\"):  r1={ARC1['r']}\"  r2={ARC2['r']}\"  r3={ARC3['r']}\"")
-    print(f"  Apex (front center):     X={APEX[0]:.3f}\"  Z={APEX[1]:.3f}\"")
-    print(f"  Back edge half-width:    X={BACK_X:.3f}\"  Z=0.000\"")
-    print(f"  Total width:             {2*BACK_X:.3f}\"")
-    print(f"  Total depth (Z):         {abs(APEX[1]):.3f}\"")
-    print(f"  Lip height (Y):          {LIP_HEIGHT:.3f}\"")
-    print(f"  TP12 (Arc1/Arc2 joint):  X={TP12[0]:.4f}\"  Z={TP12[1]:.4f}\"")
-    print(f"  TP23 (Arc2/Arc3 joint):  X={TP23[0]:.4f}\"  Z={TP23[1]:.4f}\"")
+    print(f"  Offset apex:      X={APEX_OFF[0]:.3f}\"  Z={APEX_OFF[1]:.3f}\"")
+    print(f"  Back half-width:  X={BACK_X_OFF:.3f}\"")
+    print(f"  Total width:      {2*BACK_X_OFF:.3f}\"")
+    print(f"  Total depth (Z):  {abs(APEX_OFF[1]):.3f}\"")
+    print(f"  Lip height:       {LIP_HEIGHT:.3f}\"")
+    print(f"  Grid spacing:     {GRID_SPACING:.3f}\"")
     print()
 
     print("Building main surface...")
-    main_face, arc_segments = build_main_surface()
-    print(f"  Face area: {main_face.Area():.2f} sq in")
+    occ_face = build_main_face()
+
+    print("Building cutting tools...")
+    tools, grid_count, arc_count = build_tool_faces()
+    print(f"  Grid tools:      {grid_count}")
+    print(f"  Arc split tools: {arc_count}")
+    print(f"  Total tools:     {len(tools)}")
+
+    print("Partitioning surface...")
+    partitioned = partition_face(occ_face, tools)
+    print(f"  Faces: {_count(partitioned, TopAbs_FACE)}, "
+          f"Edges: {_count(partitioned, TopAbs_EDGE)}")
 
     print("Building lip surfaces...")
-    lip_faces = build_lip(arc_segments)
+    lip_faces = build_lip_faces()
     print(f"  Lip faces: {len(lip_faces)}")
 
-    print("Assembling shell...")
-    shell = Shell.makeShell([main_face] + lip_faces)
+    print("Sewing into single shell...")
+    sewn = sew(partitioned, lip_faces)
+    print(f"  Shells: {_count(sewn, TopAbs_SHELL)}, "
+          f"Faces: {_count(sewn, TopAbs_FACE)}, "
+          f"Edges: {_count(sewn, TopAbs_EDGE)}")
 
     print(f"Exporting to {OUTPUT_PATH} ...")
-    result = cq.Workplane().add(shell)
-    cq.exporters.export(result, OUTPUT_PATH)
-
-    print(f"\nDone. Open {OUTPUT_PATH} in FreeCAD or CAD Assistant to inspect.")
+    cq.exporters.export(cq.Workplane().add(cq.Shape(sewn)), OUTPUT_PATH)
+    print(f"\nDone.")
 
 
 if __name__ == "__main__":
