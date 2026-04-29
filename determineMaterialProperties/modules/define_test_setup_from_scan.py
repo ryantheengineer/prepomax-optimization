@@ -14,6 +14,9 @@ import time
 import subprocess
 import trimesh
 import shutil
+import yaml
+
+SETUP_CONFIG = "setup_config.yaml"
 
 def create_plane_mesh(plane_model, inlier_cloud, plane_size=20.0, color=None):
     # Create a square plane oriented by the plane normal
@@ -1256,7 +1259,14 @@ def check_vertex_intersections(flex_mesh, all_meshes, threshold=1e-4):
 
     return intersections
 
-def create_model(fixture_scan_path, specimen_scan_path, output_path, visualization=False, verbose=False):    
+def create_model(fixture_scan_path, specimen_scan_path, output_path, visualization=False, verbose=False):
+    # Load and validate setup filepaths
+    try:
+        with open(SETUP_CONFIG, 'r') as f:
+            setup_config = yaml.safe_load(f)
+    except Exception as e:
+        raise Exception(f"Failed to parse setup config YAML: {e}")
+    
     expected_planes = {
         0: (np.array([0, 0, 1]), 1),
         1: (np.array([1, 0, 0]), 4),
@@ -1384,7 +1394,29 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
     # matched_specimen_scan_path = "E:/Fixture Scans/specimen.stl"
     matched_specimen_mesh = load_mesh(specimen_scan_path, verbose=verbose)
     
-    aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh, visualize=visualization, verbose=verbose)
+    # Old method: assume the specimen mesh starts from a completely different orientation
+    # aligned_specimen_mesh = align_tgt_to_ref_meshes(transformed_reference_mesh, matched_specimen_mesh, visualize=visualization, verbose=verbose)
+    
+    # New method (CrealityScan method): Assume the specimen mesh starts from
+    # the same orientation and location as the test fixture mesh, and use the
+    # same series of rotations and translations to orient the specimen.    
+    # === STEP 2: Translate to origin ===
+    matched_specimen_mesh.translate(-centroid)
+    
+    # === STEP 3: PCA alignment ===
+    matched_specimen_mesh.rotate(R_pca, center=(0, 0, 0))
+    
+    if R_flip is not None:
+        matched_specimen_mesh.rotate(R_flip, center=(0, 0, 0))
+    
+    # === STEP 4: Rotate 90° about +X ===
+    matched_specimen_mesh.rotate(R_90X, center=(0, 0, 0))
+    
+    # === STEP 5: Apply final minimal rotation matrix R ===
+    matched_specimen_mesh.rotate(R_planes, center=(0, 0, 0))
+    
+    # === RESULT ===
+    aligned_specimen_mesh = copy.deepcopy(matched_specimen_mesh)
     
     
     # Perform anvil alignment adjustment here (require specific spacing and orthogonal to base)
@@ -1451,7 +1483,8 @@ def create_model(fixture_scan_path, specimen_scan_path, output_path, visualizati
     ### Quad remesh step
     print_verbose("\nStarting quad remesh step", verbose)
     # Save the flex_mesh object on its own
-    aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
+    aligned_scans_folder = setup_config["aligned_scans_folder"]
+    # aligned_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/2 - Aligned Scans"
     aligned_flex_mesh_filename = os.path.basename(specimen_scan_path).replace("raw","aligned")
     aligned_flex_mesh_path = aligned_scans_folder + "/" + aligned_flex_mesh_filename
     flex_mesh.export(aligned_flex_mesh_path)
