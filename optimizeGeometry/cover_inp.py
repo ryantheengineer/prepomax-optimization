@@ -39,7 +39,7 @@ ARC3_OFF  = dict(cx=-5315.204, cz=1572.26,  r=6302.502)
 GRID_SPACING  = 15.0    # mm (= 3 in) — design variable grid pitch
 MESH_SPACING  = 5.0    # mm (= 1 in) — FEA triangle target size
 LIP_HEIGHT    = 50.8    # mm (= 2 in)
-PERTURB_RANGE = 25.4    # mm (= 1 in) — ± DV range
+PERTURB_RANGE = 5.0    # mm (= 1 in) — ± DV range
 RANDOM_SEED   = 42
 OUTPUT_INP    = "cover_perturbed.inp"
 
@@ -253,9 +253,15 @@ def apply_perturbations(nodes, dv_grid):
     # Second pass: linearly interpolate lip intermediate nodes
     for i,(x,y,z) in enumerate(nodes):
         if -LIP_HEIGHT + 0.5 < y < -0.5:       # lip intermediate row
-            key = (round(x,3), round(z,3))
-            y_top = top_y.get(key, 0.0)         # perturbed top node Y
-            # fraction: 0=top, 1=bottom
+            key  = (round(x,3),      round(z,3))
+            mkey = (round(-x,3),     round(z,3))  # mirror key (symmetric)
+            if key in top_y:
+                y_top = top_y[key]
+            elif mkey in top_y:
+                y_top = top_y[mkey]   # use mirrored value (same by symmetry)
+            else:
+                # Fallback: compute from DV field directly at this X,Z
+                y_top = bilinear_interp(x, z, dv_grid)
             frac = abs(y) / LIP_HEIGHT
             nodes[i][1] = y_top * (1.0 - frac) + (-LIP_HEIGHT) * frac
             n_interp += 1
