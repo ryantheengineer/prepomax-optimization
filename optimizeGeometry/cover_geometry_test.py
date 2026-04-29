@@ -47,7 +47,7 @@ ARC1_OFF  = dict(cx=0.0,     cz=31.0,    r=71.0)
 ARC2_OFF  = dict(cx=7.27,    cz=-24.53,  r=15.0)
 ARC3_OFF  = dict(cx=-209.26, cz=61.9,    r=248.13)
 
-GRID_SPACING = 3.0
+GRID_SPACING = 1.0
 LIP_HEIGHT   = 2.0
 OUTPUT_PATH  = "cover.step"
 
