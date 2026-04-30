@@ -48,6 +48,10 @@ ARC3_OFF  = dict(cx=-5315.204, cz=1572.26,  r=6302.502)
 GRID_SPACING = 15.0
 MESH_SPACING = 5.0
 LIP_HEIGHT   = 50.8
+PERTURB_MAX  = 25.4   # mm - max outward perturbation
+RANDOM_SEED  = 42
+
+THICKNESS    = 3.0    # mm - Solidify wall thickness (0 = skip Solidify)
 
 BLENDER_CMD  = "blender"
 OUTPUT_BLEND = "cover_surface.blend"
@@ -160,8 +164,8 @@ def build_lip_mesh_grid(node_map, nodes, tris):
     (exactly as cover_inp.py does).  The remaining rows are newly created at
     uniform Y spacings down to -LIP_HEIGHT.
 
-    Because the grid is built as one coherent strip — columns ordered along the
-    arc perimeter — there are no internal seam edges and no non-manifold geometry.
+    Because the grid is built as one coherent strip - columns ordered along the
+    arc perimeter - there are no internal seam edges and no non-manifold geometry.
     The winding for both the right-facing and left-facing sides of the lip is
     handled uniformly by the column order (right→left around the perimeter).
 
@@ -248,13 +252,69 @@ def build_lip_mesh_grid(node_map, nodes, tris):
 # OBJ WRITER
 # =============================================================================
 def write_obj(filepath, nodes, tris):
-    with open(filepath, 'w') as f:
-        f.write("# Window Well Cover — smooth surface (mm)\n")
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("# Window Well Cover - smooth surface (mm)\n")
         for x, y, z in nodes:
             f.write(f"v {x:.6f} {y:.6f} {z:.6f}\n")
         for n1, n2, n3 in tris:
             f.write(f"f {n1} {n2} {n3}\n")
     print(f"  OBJ: {len(nodes)} verts, {len(tris)} faces")
+
+
+# =============================================================================
+# PERTURBATIONS  (verbatim from cover_inp.py)
+# =============================================================================
+def make_dv_grid(rng, perturb_max=None):
+    if perturb_max is None:
+        perturb_max = PERTURB_MAX
+    Z_MIN  = ARC1_OFF['cz'] - ARC1_OFF['r']
+    ix_max = int(np.ceil(BX_O / GRID_SPACING)) + 1
+    iz_min = int(np.floor(Z_MIN / GRID_SPACING)) - 1
+    iz_max = -1  # no DV at iz>=0 → perturbation tapers to 0 at back edge (Z=0)
+    dv = {}
+    for ix in range(0, ix_max + 1):
+        for iz in range(iz_min, iz_max + 1):
+            dv[(ix, iz)] = rng.uniform(0.0, perturb_max)
+    return dv
+
+
+def bilinear_interp(x, z, dv_grid):
+    s = GRID_SPACING
+    ix0 = int(np.floor(x / s)); ix1 = ix0 + 1
+    iz0 = int(np.floor(z / s)); iz1 = iz0 + 1
+    tx = (x - ix0 * s) / s;    tz = (z - iz0 * s) / s
+    def dv(ix, iz): return dv_grid.get((abs(ix), iz), 0.0)
+    return (dv(ix0,iz0)*(1-tx)*(1-tz) + dv(ix1,iz0)*tx*(1-tz) +
+            dv(ix0,iz1)*(1-tx)*tz     + dv(ix1,iz1)*tx*tz)
+
+
+def apply_perturbations(nodes, dv_grid):
+    """
+    Perturb Y of all nodes in place - identical logic to cover_inp.py.
+
+    Main face nodes (Y≈0): shift by bilinear interpolation of dv_grid.
+    Lip top nodes (also Y≈0 at their arc position): same shift.
+    Lip intermediate rows: linearly interpolated between perturbed top and
+    fixed bottom so the flange doesn't kink independently.
+    Lip bottom (Y=-LIP_HEIGHT): pinned exactly.
+    """
+    top_y = {}
+    for i, (x, y, z) in enumerate(nodes):
+        if abs(y + LIP_HEIGHT) < 0.5:
+            nodes[i][1] = -LIP_HEIGHT
+        elif abs(y) < 0.5:
+            dy = bilinear_interp(x, z, dv_grid)
+            nodes[i][1] = y + dy
+            top_y[(round(x, 3), round(z, 3))] = nodes[i][1]
+    for i, (x, y, z) in enumerate(nodes):
+        if -LIP_HEIGHT + 0.5 < y < -0.5:
+            key  = (round(x, 3),  round(z, 3))
+            mkey = (round(-x, 3), round(z, 3))
+            if key  in top_y: y_top = top_y[key]
+            elif mkey in top_y: y_top = top_y[mkey]
+            else: y_top = bilinear_interp(x, z, dv_grid)
+            frac = abs(y) / LIP_HEIGHT
+            nodes[i][1] = y_top * (1 - frac) + (-LIP_HEIGHT) * frac
 
 
 # =============================================================================
@@ -289,26 +349,8 @@ def find_blender(user_specified=None):
 # =============================================================================
 # BLENDER IMPORT-AND-SAVE SCRIPT
 # =============================================================================
-BLENDER_IMPORT_SCRIPT = '''\
-import bpy, sys, os
+BLENDER_SCRIPT = 'import bpy, sys, math, collections, bmesh\n\nargv  = sys.argv\nafter = argv[argv.index("--") + 1:]\nsmooth_obj   = after[0]   # unperturbed inner surface OBJ\nperturb_obj  = after[1]   # perturbed inner surface OBJ (to get dy per vertex)\noutput_blend = after[2]\nthickness    = float(after[3])\n\nARC1=(0.0,787.4,1803.4); ARC2=(184.658,-623.062,381.0); ARC3=(-5315.204,1572.26,6302.502)\ndef _tp(a,b):\n    cx1,cz1,r1=a; cx2,cz2,r2=b; d=math.hypot(cx2-cx1,cz2-cz1); ux,uz=(cx2-cx1)/d,(cz2-cz1)/d\n    return (cx1+r1*ux,cz1+r1*uz) if r1>=r2 else (cx2-r2*ux,cz2-r2*uz)\nTP12=_tp(ARC1,ARC2); TP23=_tp(ARC3,ARC2)\ndef arc_outward(ox,oz):\n    ax=abs(ox)\n    if ax<=TP12[0]: cx,cz=ARC1[0],ARC1[1]\n    elif ax<=TP23[0]: cx,cz=ARC2[0],ARC2[1]\n    else: cx,cz=ARC3[0],ARC3[1]\n    dx,dz=ax-cx,oz-cz; mag=math.sqrt(dx*dx+dz*dz)\n    return (dx/mag,dz/mag) if ox>=0 else (-dx/mag,dz/mag)\n\ndef read_obj(path):\n    verts=[]; faces=[]\n    with open(path,encoding=\'utf-8\') as f:\n        for line in f:\n            if line.startswith(\'v \'):\n                p=line.split(); verts.append([float(p[1]),float(p[2]),float(p[3])])\n            elif line.startswith(\'f \'):\n                p=line.split(); faces.append((int(p[1])-1,int(p[2])-1,int(p[3])-1))\n    return verts, faces\n\n# Read smooth (unperturbed) mesh and perturbed mesh\nsmooth_v, faces = read_obj(smooth_obj)\nperturb_v, _   = read_obj(perturb_obj)\nN = len(smooth_v)\nprint(f"Smooth mesh: {N} verts, {len(faces)} faces")\n\n# Compute per-vertex dy (perturbation in Y)\ndy = [perturb_v[i][1] - smooth_v[i][1] for i in range(N)]\n\n# Find boundary vertices\nec=collections.Counter()\nfor f in faces:\n    for e in ((min(f[0],f[1]),max(f[0],f[1])),(min(f[1],f[2]),max(f[1],f[2])),(min(f[0],f[2]),max(f[0],f[2]))):\n        ec[e]+=1\nboundary_verts={v for e,c in ec.items() if c==1 for v in e}\nback_edge={v for v in boundary_verts if abs(smooth_v[v][2])<0.5}\narc_perim=boundary_verts-back_edge\n\n# Step 1: Compute outer positions from the SMOOTH mesh (no self-intersection possible)\nLIP_HEIGHT=50.8\nouter_smooth=[]\nfor i,(ox,oy,oz) in enumerate(smooth_v):\n    if i in arc_perim or oy<0:\n        odx,odz=arc_outward(ox,oz)\n        outer_smooth.append([ox+thickness*odx, oy, oz+thickness*odz])\n    else:\n        outer_smooth.append([ox, oy+thickness, oz])\n\n# Step 2: Apply SAME perturbation dy to both inner and outer nodes\n# This keeps wall thickness exactly uniform everywhere\ninner_v=[[smooth_v[i][0], smooth_v[i][1]+dy[i], smooth_v[i][2]] for i in range(N)]\nouter_v=[[outer_smooth[i][0], outer_smooth[i][1]+dy[i], outer_smooth[i][2]] for i in range(N)]\nprint(f"Perturbations applied to both layers (same dy per vertex)")\n\n# The outer lip now has Y = smooth_outer_lip_Y + dy\n# smooth_outer_lip_Y = smooth_inner_lip_Y (arc XZ offset, no Y change)\n# So outer_lip_Y = smooth_inner_lip_Y + dy = inner_lip_Y (same as inner!)\n# Lip walls are EXACTLY vertical: outer.y = inner.y for all lip nodes.\n# No post-correction needed -- it falls out of the math automatically.\n\n# Check: verify a lip node\nlip_i = next(i for i,(ox,oy,oz) in enumerate(smooth_v) if -LIP_HEIGHT<oy<0)\nprint(f"Lip check: inner.y={inner_v[lip_i][1]:.3f}, outer.y={outer_v[lip_i][1]:.3f}, diff={outer_v[lip_i][1]-inner_v[lip_i][1]:.3f} (want 0)")\n\n# Build rim face directed edges\ndirected={}\nfor f in faces:\n    for a,b in [(f[0],f[1]),(f[1],f[2]),(f[2],f[0])]:\n        key=(min(a,b),max(a,b))\n        if ec[key]==1: directed[key]=(a,b)\nbnd_edges=list(directed.values())\n\n# Write solid OBJ\nlines=["# Window Well Cover - Solid (smooth-solidify + perturbation)\\n"]\nfor x,y,z in inner_v: lines.append(f"v {x:.6f} {y:.6f} {z:.6f}\\n")\nfor x,y,z in outer_v: lines.append(f"v {x:.6f} {y:.6f} {z:.6f}\\n")\nlines.append("g inner\\n")\nfor f in faces: lines.append(f"f {f[0]+1} {f[1]+1} {f[2]+1}\\n")\nlines.append("g outer\\n")\nfor f in faces: lines.append(f"f {f[2]+N+1} {f[1]+N+1} {f[0]+N+1}\\n")\nlines.append("g rim\\n")\nfor a,b in bnd_edges:\n    ai,bi,ao,bo=a+1,b+1,a+N+1,b+N+1\n    lines.append(f"f {ai} {bi} {bo}\\n")\n    lines.append(f"f {ai} {bo} {ao}\\n")\n\nimport tempfile, os\nsolid_obj=os.path.join(tempfile.gettempdir(),"cover_solid_final.obj")\nwith open(solid_obj,\'w\',encoding=\'utf-8\') as f: f.writelines(lines)\nprint(f"Solid OBJ: {2*N} verts, {2*len(faces)+2*len(bnd_edges)} faces")\n\nbpy.ops.object.select_all(action=\'SELECT\')\nbpy.ops.object.delete(use_global=False)\nbpy.ops.wm.obj_import(filepath=solid_obj)\nobj=bpy.context.selected_objects[0]; obj.name="CoverSolid"\nbpy.context.view_layer.objects.active=obj\nprint(f"Imported: {len(obj.data.vertices)} verts, {len(obj.data.polygons)} faces")\n\n# Recalculate face normals - OCC triangulation gives mixed winding\nbm_fix=bmesh.new(); bm_fix.from_mesh(obj.data)\nbmesh.ops.recalc_face_normals(bm_fix, faces=bm_fix.faces)\nbm_fix.to_mesh(obj.data); bm_fix.free(); obj.data.update()\nprint("Normals recalculated")\n\nbpy.ops.wm.save_as_mainfile(filepath=output_blend)\nprint(f"Saved: {output_blend}")\n'
 
-argv = sys.argv
-after = argv[argv.index("--") + 1:]
-input_obj    = after[0]
-output_blend = after[1]
-
-bpy.ops.object.select_all(action='SELECT')
-bpy.ops.object.delete(use_global=False)
-
-bpy.ops.wm.obj_import(filepath=input_obj)
-obj = bpy.context.selected_objects[0]
-obj.name = "CoverSurface"
-bpy.ops.object.shade_smooth()
-
-bpy.ops.wm.save_as_mainfile(filepath=output_blend)
-print(f"Saved: {output_blend}")
-print(f"Verts: {len(obj.data.vertices)}, Faces: {len(obj.data.polygons)}")
-'''
 
 
 # =============================================================================
@@ -333,14 +375,26 @@ def check_manifold(tris, label="mesh"):
 # =============================================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Build cover surface mesh and open in Blender.")
-    parser.add_argument("--output",  default=OUTPUT_BLEND)
-    parser.add_argument("--blender", default=BLENDER_CMD)
+        description="Build cover surface mesh, apply perturbations and "
+                    "Solidify, save as .blend.")
+    parser.add_argument("--output",    default=OUTPUT_BLEND,
+                        help="Output .blend file (default: %(default)s)")
+    parser.add_argument("--blender",   default=BLENDER_CMD,
+                        help="Blender executable path")
+    parser.add_argument("--thickness", type=float, default=THICKNESS,
+                        help="Solidify wall thickness in mm, 0 = skip (default: %(default)s)")
+    parser.add_argument("--seed",      type=int,   default=RANDOM_SEED,
+                        help="Random seed for perturbations (default: %(default)s)")
+    parser.add_argument("--perturb",   type=float, default=PERTURB_MAX,
+                        help="Max perturbation in mm, 0 = none (default: %(default)s)")
     args = parser.parse_args()
 
     output_blend = os.path.abspath(args.output)
     blender_exe  = find_blender(args.blender)
-    print(f"Using Blender: {blender_exe}\n")
+    print(f"Using Blender: {blender_exe}")
+    print(f"Thickness: {args.thickness} mm   "
+          f"Perturbation: 0..{args.perturb} mm   "
+          f"Seed: {args.seed}\n")
 
     # ── Build geometry ───────────────────────────────────────────────────
     print("Building main face...")
@@ -361,25 +415,41 @@ def main():
     check_manifold(tris[n_main_tris:], "lip only")
     check_manifold(tris,               "full mesh")
 
-    # ── Write OBJ + call Blender ─────────────────────────────────────────
+    # ── Write smooth OBJ (before perturbations) ─────────────────────────
     tmpdir      = tempfile.mkdtemp(prefix="cover_blend_")
-    obj_path    = os.path.join(tmpdir, "cover_surface.obj")
-    script_path = os.path.join(tmpdir, "import_save.py")
+    smooth_path  = os.path.join(tmpdir, "cover_smooth.obj")
+    perturb_path = os.path.join(tmpdir, "cover_perturbed.obj")
+    script_path  = os.path.join(tmpdir, "blender_script.py")
 
-    print(f"\nWriting OBJ...")
-    write_obj(obj_path, nodes, tris)
+    print(f"\nWriting smooth OBJ (no perturbations)...")
+    write_obj(smooth_path, nodes, tris)
 
-    with open(script_path, 'w') as f:
-        f.write(BLENDER_IMPORT_SCRIPT)
+    # ── Apply perturbations and write perturbed OBJ ───────────────────────
+    if args.perturb > 0:
+        print(f"Applying perturbations (max {args.perturb} mm, seed {args.seed})...")
+        rng     = np.random.default_rng(args.seed)
+        dv_grid = make_dv_grid(rng, perturb_max=args.perturb)
+        apply_perturbations(nodes, dv_grid)
+        print(f"  Done. Writing perturbed OBJ...")
+        write_obj(perturb_path, nodes, tris)
+    else:
+        print("Perturbations skipped (--perturb 0), copying smooth as perturbed...")
+        shutil.copy(smooth_path, perturb_path)
 
-    print("Calling Blender...")
+    with open(script_path, 'w', encoding='utf-8') as f:
+        f.write(BLENDER_SCRIPT)
+
+    solidify_label = f"thickness {args.thickness} mm" if args.thickness > 0 else "(no thickness)"
+    print(f"Calling Blender ({solidify_label})...")
     result = subprocess.run(
         [blender_exe, "--background", "--factory-startup",
-         "--python", script_path, "--", obj_path, output_blend],
+         "--python", script_path,
+         "--", smooth_path, perturb_path, output_blend, str(args.thickness)],
         capture_output=True, text=True)
 
     for line in result.stdout.splitlines():
-        if any(kw in line for kw in ["Saved:", "Verts:", "ERROR", "Traceback"]):
+        if any(kw in line for kw in ["Smooth mesh", "Perturbations applied", "Lip check",
+                                      "Solid OBJ", "Imported:", "Saved:", "ERROR", "Traceback"]):
             print(f"  [blender] {line}")
 
     if result.returncode != 0 or not os.path.isfile(output_blend):
