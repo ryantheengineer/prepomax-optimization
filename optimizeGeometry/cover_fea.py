@@ -560,6 +560,97 @@ DEFAULTS = {
 
 
 # =============================================================================
+# RUN CALCULIX AND EXTRACT MAX -Y DEFLECTION
+# =============================================================================
+def run_ccx_and_extract(inp_path, ccx_cmd):
+    """
+    Run CalculiX on inp_path, parse the .frd output, and return the maximum
+    negative Y displacement (mm) — i.e. the largest downward deflection.
+
+    .frd format (fixed-width text):
+      Block header : " -4  DISP        4    1"
+      Component hdrs: " -5  D1 ..." / " -5  D2 ..." / ...
+      Data lines   : " -1    <nid><D1 12ch><D2 12ch><D3 12ch>"
+                      chars 0-2   = record type (" -1")
+                      chars 2-12  = node ID (right-justified)
+                      chars 12-24 = D1 (Ux)
+                      chars 24-36 = D2 (Uy)  <- this is what we want
+                      chars 36-48 = D3 (Uz)
+      Block end    : " -3"
+    """
+    import subprocess
+    from pathlib import Path
+
+    stem = str(Path(inp_path).with_suffix(""))
+    frd_path = stem + ".frd"
+
+    print(f"\nRunning: {ccx_cmd} {stem}")
+    result = subprocess.run([ccx_cmd, stem], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stdout[-3000:])
+        print(result.stderr[-1000:])
+        raise RuntimeError(f"CalculiX failed (exit {result.returncode})")
+    print(result.stdout[-500:])   # tail of ccx output for confirmation
+
+    # Parse .frd for the minimum D2 value (most negative Y displacement).
+    #
+    # Fixed-width layout of a data line (verified against real ccx output):
+    #   chars  0- 2 : record type " -1"
+    #   chars  3-12 : node ID (10 chars, right-justified)
+    #   chars 13-24 : D1 / component 0  (12 chars)
+    #   chars 25-36 : D2 / component 1  (12 chars)  <- Y displacement
+    #   chars 37-48 : D3 / component 2  (12 chars)
+    #   ...each subsequent component adds 12 chars
+    #
+    # BASE = 13 (first value field); each component occupies 12 chars.
+    BASE = 13
+
+    max_neg_y = 0.0
+    in_disp   = False
+    d2_offset = BASE + 12   # default: D2 is the 2nd component (index 1)
+
+    with open(frd_path, "r", errors="replace") as f:
+        for line in f:
+            if len(line) < 3:
+                continue
+
+            if line[1:3] == "-4" and "DISP" in line:
+                in_disp    = True
+                comp_index = 0
+                d2_offset  = BASE + 12   # reset default
+                continue
+
+            if not in_disp:
+                continue
+
+            rec = line[1:3]
+
+            if rec == "-5":
+                comp_name = line[4:12].strip()
+                if comp_name == "ALL":
+                    continue
+                if comp_name in ("D2", "U2"):
+                    d2_offset = BASE + comp_index * 12
+                comp_index += 1
+
+            elif rec == "-1":
+                try:
+                    u2 = float(line[d2_offset:d2_offset + 12])
+                    if u2 < max_neg_y:
+                        max_neg_y = u2
+                except (ValueError, IndexError):
+                    pass
+
+            elif rec == "-3":
+                in_disp = False
+
+    if max_neg_y == 0.0:
+        print("  WARNING: no negative Y displacement found — check .frd file")
+
+    return max_neg_y
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -606,6 +697,11 @@ def main():
                    help="Load patch radius mm")
     p.add_argument("--load-force",  type=float, default=D["load_force_n"],
                    help="Total load force N (applied as -Y)")
+
+    p.add_argument("--ccx", default=None, metavar="PATH",
+                   help="CalculiX executable (e.g. ccx or C:/ccx/ccx.exe). "
+                        "If given, runs the analysis after writing the .inp "
+                        "and prints the max negative-Y displacement.")
 
     args = p.parse_args()
 
@@ -716,6 +812,11 @@ def main():
     print(f"  C3D4 tets: {len(elems):>10,}")
     print(f"  Output:    {out}")
     print("=" * 55)
+
+    if args.ccx:
+        max_neg_y = run_ccx_and_extract(out, args.ccx)
+        print(f"  Max -Y deflection: {max_neg_y:.6f} mm")
+        return max_neg_y
 
 
 if __name__ == "__main__":
