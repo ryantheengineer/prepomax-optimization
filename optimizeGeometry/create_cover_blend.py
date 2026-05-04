@@ -45,10 +45,10 @@ ARC1_OFF  = dict(cx=0.0,       cz=787.4,    r=1803.4)
 ARC2_OFF  = dict(cx=184.658,   cz=-623.062, r=381.0)
 ARC3_OFF  = dict(cx=-5315.204, cz=1572.26,  r=6302.502)
 
-GRID_SPACING = 15.0
+GRID_SPACING = 50.0
 MESH_SPACING = 5.0
 LIP_HEIGHT   = 50.8
-PERTURB_MAX  = 25.4   # mm - max outward perturbation
+PERTURB_MAX  = 10.0   # mm - max outward perturbation
 RANDOM_SEED  = 42
 
 THICKNESS    = 3.0    # mm - Solidify wall thickness (0 = skip Solidify)
