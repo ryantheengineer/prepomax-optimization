@@ -58,29 +58,144 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-from cover_fea import FEAConfig, get_dv_shape, run as fea_run
+from cover_fea import FEAConfig, get_dv_shape, get_dv_coords, run as fea_run
+
+PENALTY = 9999.0 # mm - larger than any physically realistic deflection
+
+
+# =============================================================================
+# STRUCTURAL PENALTY
+# =============================================================================
+def _build_fourier_basis(node_coords: np.ndarray, n_freq: int) -> np.ndarray:
+    """
+    Build a 2D cosine/sine Fourier basis over the DV grid coordinates.
+
+    Parameters
+    ----------
+    node_coords : (n, 2) array of (x_mm, z_mm) for each DV
+    n_freq      : number of frequency steps in each axis (0..n_freq-1)
+
+    Returns
+    -------
+    B : (n, n_basis) array  — each column is one basis function evaluated
+        at every DV location.  n_basis = 4 * n_freq^2.
+    """
+    x, z = node_coords[:, 0], node_coords[:, 1]
+    # Normalise to [0, 2π]
+    x_n = 2.0 * np.pi * (x - x.min()) / (np.ptp(x) + 1e-9)
+    z_n = 2.0 * np.pi * (z - z.min()) / (np.ptp(z) + 1e-9)
+    cols = []
+    for fx in range(n_freq):
+        for fz in range(n_freq):
+            cols.append(np.cos(fx * x_n) * np.cos(fz * z_n))
+            cols.append(np.cos(fx * x_n) * np.sin(fz * z_n))
+            cols.append(np.sin(fx * x_n) * np.cos(fz * z_n))
+            cols.append(np.sin(fx * x_n) * np.sin(fz * z_n))
+    return np.column_stack(cols)   # shape (n, 4*n_freq^2)
+
+
+# Cached basis matrix — recomputed only if n_freq changes.
+_BASIS_CACHE: dict = {}
+
+def structural_penalty(dv: np.ndarray,
+                       node_coords: np.ndarray,
+                       n_freq: int = 6) -> float:
+    """
+    Return a penalty in [0, 1] that is LOW when the DV pattern is dominated
+    by a small number of low-spatial-frequency modes (ribs, corrugations,
+    saddle shapes) and HIGH when the pattern is high-frequency noise.
+
+    Also includes a variance reward so the optimizer does not collapse to a
+    flat plate (which would trivially score 0 on the frequency penalty).
+
+    Parameters
+    ----------
+    dv          : flat DV array, length n
+    node_coords : (n, 2) real (x, z) coordinates in mm from get_dv_coords()
+    n_freq      : number of Fourier frequency steps per axis.
+                  n_freq=6 allows up to 5 full cycles across the part, which
+                  captures typical rib spacings without passing fine noise.
+
+    Returns
+    -------
+    penalty : float in roughly [0, 1]
+        0   → perfectly low-frequency (all energy in the kept basis)
+        1   → pure high-frequency noise, zero variance
+    """
+    global _BASIS_CACHE
+    if n_freq not in _BASIS_CACHE:
+        _BASIS_CACHE[n_freq] = _build_fourier_basis(node_coords, n_freq)
+    B = _BASIS_CACHE[n_freq]           # (n, n_basis)
+
+    # Project DV onto the low-frequency basis via least squares
+    coeffs, _, _, _ = np.linalg.lstsq(B, dv, rcond=None)
+    dv_lowfreq = B @ coeffs
+
+    # High-frequency energy fraction
+    residual    = dv - dv_lowfreq
+    dv_energy   = float(np.dot(dv, dv))
+    hf_fraction = float(np.dot(residual, residual)) / (dv_energy + 1e-9)
+
+    # Variance reward: penalise flat designs (low variance = near-zero DV energy)
+    # Normalise by max possible variance (all values at perturb_max/2 from mean)
+    dv_var     = float(np.var(dv))
+    max_var    = (np.ptp(node_coords) / 2.0) ** 2   # rough upper bound
+    flat_pen   = max(0.0, 1.0 - dv_var / (max_var + 1e-9))
+
+    # Combined: high-freq noise penalty + flat-plate penalty
+    # Both are in [0,1]; weight flat_pen less since it's a secondary concern.
+    return 0.8 * hf_fraction + 0.2 * flat_pen
 
 
 # =============================================================================
 # OBJECTIVE FUNCTION
 # =============================================================================
-def objective(dv: np.ndarray, cfg: FEAConfig, run_name: str) -> tuple:
+def objective(dv: np.ndarray,
+              cfg: FEAConfig,
+              run_name: str,
+              node_coords: np.ndarray,
+              struct_weight: float = 0.1,
+              n_freq: int = 6) -> tuple:
     """
     Evaluate one design.
 
     Returns (obj_value, result_dict) where obj_value is the quantity
-    CMA-ES minimizes (max downward deflection, sign-flipped to positive).
+    CMA-ES minimizes.
+
+    obj_value = deflection_mm * (1 + struct_weight * structural_penalty)
+
+    The structural penalty is in [0, 1]:
+      0 → perfectly low-frequency / regular pattern (ribs, corrugations)
+      1 → pure high-frequency noise or flat plate
+
+    A displacement sanity check is also applied: if the max total displacement
+    across all nodes is more than 5× the Y deflection of interest, the result
+    is flagged as a numerical blowup (XZ stretching artifact) and penalised.
     """
     result = fea_run(dv, cfg, name=run_name)
-    max_neg_y = result["max_neg_y"]
+    max_neg_y      = result.get("max_neg_y")
+    max_total_disp = result.get("max_total_disp")
 
+    # Failed run — CalculiX crashed or no result
     if max_neg_y is None:
-        # CalculiX wasn't run — shouldn't happen in optimizer context
-        raise RuntimeError("cfg.ccx must be set to run the optimizer.")
+        return PENALTY, result
 
-    # CMA-ES minimizes, so we minimize |max_neg_y| (deflection magnitude).
-    # max_neg_y is negative (downward), so abs() gives the deflection magnitude.
     obj_value = abs(max_neg_y)
+
+    # Sanity check — XZ stretching / numerical blowup
+    if max_total_disp is not None:
+        ratio = max_total_disp / (obj_value + 1e-9)
+        if ratio > 5.0:
+            print(f"    [sanity] total disp {max_total_disp:.1f} mm vs "
+                  f"Y disp {obj_value:.1f} mm (ratio {ratio:.1f}) → PENALTY")
+            return PENALTY, result
+
+    # Structural penalty — reward low-frequency regularity
+    if struct_weight > 0.0 and node_coords is not None:
+        sp = structural_penalty(dv, node_coords, n_freq=n_freq)
+        obj_value = obj_value * (1.0 + struct_weight * sp)
+        print(f"    [struct] penalty={sp:.3f}  weighted_obj={obj_value:.4f} mm")
+
     return obj_value, result
 
 
@@ -102,6 +217,7 @@ def load_checkpoint(output_dir):
 
 
 def save_history(output_dir, generation, total_evals, best_obj, best_run_name):
+    """Append one row per generation (best so far)."""
     path = os.path.join(output_dir, "history.csv")
     write_header = not os.path.exists(path)
     with open(path, "a") as f:
@@ -110,6 +226,95 @@ def save_history(output_dir, generation, total_evals, best_obj, best_run_name):
         f.write(f"{generation},{total_evals},{best_obj:.6f},{best_run_name}\n")
 
 
+def save_eval(output_dir, generation, eval_num, run_name, obj_val, failed=False):
+    """Append one row per individual FEA evaluation to evals.csv."""
+    path = os.path.join(output_dir, "evals.csv")
+    write_header = not os.path.exists(path)
+    with open(path, "a") as f:
+        if write_header:
+            f.write("generation,eval_num,run_name,deflection_mm,failed\n")
+        val_str = "failed" if failed else f"{obj_val:.6f}"
+        f.write(f"{generation},{eval_num},{run_name},{val_str},{int(failed)}\n")
+
+
+def plot_progress(output_dir):
+    """
+    Regenerate opt_progress.png after each generation showing:
+      Top:    every individual FEA result (scatter), failed runs marked
+      Bottom: best-so-far deflection stepping down over evaluations
+    Silently skips if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import csv
+    except ImportError:
+        return
+
+    evals_path   = os.path.join(output_dir, "evals.csv")
+    history_path = os.path.join(output_dir, "history.csv")
+    if not os.path.exists(evals_path):
+        return
+
+    evals, gens, vals, failed_mask = [], [], [], []
+    with open(evals_path) as f:
+        for row in csv.DictReader(f):
+            evals.append(int(row["eval_num"]))
+            gens.append(int(row["generation"]))
+            failed_mask.append(row["failed"] == "1")
+            vals.append(None if row["failed"] == "1"
+                        else float(row["deflection_mm"]))
+
+    hist_evals, hist_best = [], []
+    if os.path.exists(history_path):
+        with open(history_path) as f:
+            for row in csv.DictReader(f):
+                hist_evals.append(int(row["total_evals"]))
+                hist_best.append(float(row["best_deflection_mm"]))
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig.suptitle("CMA-ES Cover Optimization Progress", fontsize=13)
+
+    ok_x   = [e for e, v, f in zip(evals, vals, failed_mask) if not f]
+    ok_y   = [v for v, f    in zip(vals, failed_mask)         if not f]
+    fail_x = [e for e, f    in zip(evals, failed_mask)         if f]
+    y_max  = max(ok_y) * 1.08 if ok_y else 1.0
+    fail_y = [y_max] * len(fail_x)
+
+    ax1.scatter(ok_x, ok_y, s=18, alpha=0.6, color="steelblue", label="FEA eval")
+    if fail_x:
+        ax1.scatter(fail_x, fail_y, s=40, marker="x",
+                    color="red", label="failed", zorder=3)
+    ax1.set_ylabel("Deflection (mm)")
+    ax1.set_title("All evaluations")
+    ax1.legend(fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # Generation boundary lines
+    gen_starts = {}
+    for e, g in zip(evals, gens):
+        gen_starts.setdefault(g, e)
+    for g, e in sorted(gen_starts.items())[1:]:
+        ax1.axvline(e - 0.5, color="gray", lw=0.5, ls="--", alpha=0.5)
+        ax2.axvline(e - 0.5, color="gray", lw=0.5, ls="--", alpha=0.5)
+
+    if hist_evals:
+        ax2.step(hist_evals, hist_best, where="post",
+                 color="darkorange", lw=2, label="Best so far")
+        ax2.scatter(hist_evals, hist_best, s=35,
+                    color="darkorange", zorder=3)
+        ax2.set_ylabel("Best deflection (mm)")
+        ax2.set_title("Best deflection so far")
+        ax2.legend(fontsize=8)
+        ax2.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("Evaluation number")
+    plt.tight_layout()
+    out = os.path.join(output_dir, "opt_progress.png")
+    plt.savefig(out, dpi=120, bbox_inches="tight")
+    plt.close()
+    print(f"  Plot saved: {out}")
 def save_best(output_dir, dv, result, obj_value):
     # DV vector
     np.savetxt(
@@ -142,19 +347,24 @@ def optimize(args):
         max_tet_vol       = args.max_tet_vol,
         min_tet_quality   = args.min_tet_quality,
         thickness         = args.thickness,
+        grid_spacing      = args.grid_spacing,
         load_z            = args.load_z,
         load_radius       = args.load_radius,
         load_force        = args.load_force,
         perturb_max       = args.perturb_max,
-        tet_timeout       = args.tet_timeout,
         ccx               = args.ccx,
         solver            = args.solver,
+        tet_timeout       = args.tet_timeout,
         output_dir        = args.output_dir,
     )
 
-    n = get_dv_shape()
+    n = get_dv_shape(args.grid_spacing)
     lb = 0.0
     ub = args.perturb_max
+
+    # Load DV spatial coordinates once — shape (n, 2), columns [x_mm, z_mm].
+    # These are fixed for the lifetime of the optimizer (grid doesn't change).
+    node_coords = get_dv_coords(args.grid_spacing)
 
     print("=" * 60)
     print("CMA-ES Cover Geometry Optimizer")
@@ -164,6 +374,7 @@ def optimize(args):
     print(f"  Max evaluations:   {args.max_evals}")
     print(f"  Convergence tol:   {args.tol}")
     print(f"  Output dir:        {args.output_dir}")
+    print(f"  Grid spacing:      {cfg.grid_spacing} mm  ({n} DVs)")
     print(f"  Surface mesh size: {cfg.surface_mesh_size} mm")
     print(f"  Max tet volume:    {cfg.max_tet_vol}")
     print(f"  Load:              {cfg.load_force} N at Z={cfg.load_z}, r={cfg.load_radius} mm")
@@ -257,7 +468,12 @@ def optimize(args):
 
             t0 = time.time()
             try:
-                obj_val, result = objective(dv_clipped, cfg, run_name)
+                obj_val, result = objective(
+                    dv_clipped, cfg, run_name,
+                    node_coords=node_coords,
+                    struct_weight=args.struct_weight,
+                    n_freq=args.n_freq,
+                )
                 elapsed = time.time() - t0
                 print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
 
@@ -268,16 +484,16 @@ def optimize(args):
                     best_run    = run_name
                     save_best(args.output_dir, best_dv, best_result, best_obj)
                     print(f"    *** New best: {best_obj:.4f} mm ***")
+                save_eval(args.output_dir, generation, total_evals + 1,
+                          run_name, obj_val, failed=False)
 
             except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
                 print(f"FAILED: {e}")
-                fail_log = os.path.join(args.output_dir, "failures.log")
-                with open(fail_log, "a") as flog:
-                    flog.write(f"\n{'='*60}\n")
-                    flog.write(f"Run: {run_name}\n")
-                    flog.write(tb)
+                # Penalise failed runs heavily so CMA-ES avoids that region
+                save_eval(args.output_dir, generation, total_evals + 1,
+                          run_name, 1e6, failed=True)
+                save_eval(args.output_dir, generation, total_evals + 1,
+                          run_name, 1e6, failed=True)
                 obj_val = 1e6
                 result  = None
 
@@ -292,6 +508,8 @@ def optimize(args):
         # Save checkpoint after every generation
         save_checkpoint(es, args.output_dir)
         save_history(args.output_dir, generation, total_evals, best_obj, best_run)
+        plot_progress(args.output_dir)
+        plot_progress(args.output_dir)
 
         elapsed_total = time.time() - t_start
         print(f"  Generation {generation} done. "
@@ -351,10 +569,19 @@ def main():
                    help="Resume from checkpoint in --output-dir")
     p.add_argument("--dv-file",     default=None,
                    help="CSV file of initial DV values (default: random)")
+    p.add_argument("--struct-weight", type=float, default=0.1,
+                   help="Weight for structural regularity penalty [0=off, 0.1=default]. "
+                        "Penalises high-frequency noise; rewards rib/corrugation patterns. "
+                        "Value is a multiplier on the deflection objective: "
+                        "obj = deflection * (1 + struct_weight * penalty).")
+    p.add_argument("--n-freq",      type=int,   default=6,
+                   help="Number of Fourier frequency steps per axis for the structural "
+                        "penalty (default 6 → allows up to 5 full cycles across the part). "
+                        "Increase to allow finer features; decrease to force coarser patterns.")
 
     # FEA config
-    p.add_argument("--ccx",               required=True,
-                   help="Path to CalculiX executable")
+    p.add_argument("--ccx",               default=cfg_default.ccx,
+                   help="Path to CalculiX executable (default: hardcoded path in FEAConfig)")
     p.add_argument("--output-dir",        default="opt_results")
     p.add_argument("--surface-mesh-size", type=float,
                    default=cfg_default.surface_mesh_size)
@@ -372,6 +599,12 @@ def main():
                    default=cfg_default.load_force)
     p.add_argument("--perturb-max",       type=float,
                    default=cfg_default.perturb_max)
+    p.add_argument("--grid-spacing",      type=float,
+                   default=cfg_default.grid_spacing,
+                   help="Spacing (mm) of the DV perturbation grid. "
+                        "Smaller = more DVs, finer shape control, slower convergence. "
+                        f"Default: {cfg_default.grid_spacing} mm "
+                        "(matches create_cover_blend.py GRID_SPACING).")
     p.add_argument("--solver",            default=cfg_default.solver,
                    choices=["SPOOLES", "Pardiso"])
     p.add_argument("--tet-timeout",       type=int,

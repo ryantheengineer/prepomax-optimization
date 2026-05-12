@@ -124,8 +124,14 @@ class FEAConfig:
     load_force: float                = 1780.0
     """Total downward force (N) applied as a rigid-body load via the RP."""
 
-    # ── Perturbation ────────────────────────────────────────────────────────
-    perturb_max: float               = 25.4
+    # ── DV grid ─────────────────────────────────────────────────────────────
+    grid_spacing: float              = 25.0
+    """Spacing (mm) of the perturbation grid used to define the DV points.
+    Smaller → more DVs, finer shape control, slower convergence.
+    Must match the value used when get_dv_shape() / get_dv_coords() are called.
+    Default matches create_cover_blend.py GRID_SPACING = 25.0."""
+
+    perturb_max: float               = 50.8
     """Upper bound for perturbation height values (mm).
     DV values must be in [0, perturb_max]."""
 
@@ -169,54 +175,74 @@ class FEAConfig:
 # =============================================================================
 # DV GRID
 # =============================================================================
-def _dv_grid_dims():
+def _dv_grid_dims(grid_spacing: float = None):
+    """Compute grid dimensions using the given spacing (mm).
+    Falls back to ccb.GRID_SPACING if not provided."""
+    gs = float(grid_spacing) if grid_spacing is not None else ccb.GRID_SPACING
     Z_MIN  = _ARC1[1] - _ARC1[2]
     BX_O   = _ARC3[0] + math.sqrt(_ARC3[2]**2 - _ARC3[1]**2)
-    ix_max = int(math.ceil(BX_O  / ccb.GRID_SPACING)) + 1
-    iz_min = int(math.floor(Z_MIN / ccb.GRID_SPACING)) - 1
+    ix_max = int(math.ceil(BX_O  / gs)) + 1
+    iz_min = int(math.floor(Z_MIN / gs)) - 1
     ix_list = list(range(0, ix_max + 1))
     iz_list = list(range(iz_min, -1 + 1))   # iz_max = -1
-    return len(ix_list), len(iz_list), ix_list, iz_list
+    return len(ix_list), len(iz_list), ix_list, iz_list, gs
 
 
-def get_dv_shape() -> int:
+def get_dv_shape(grid_spacing: float = None) -> int:
     """
     Return the number of DV values required by the current grid.
 
+    Parameters
+    ----------
+    grid_spacing : float, optional
+        Spacing (mm) of the perturbation grid.  If None, uses
+        ccb.GRID_SPACING (the module-level default, 25.0 mm).
+
     Call this once from your optimizer to size the DV vector.
     """
-    n_ix, n_iz, _, _ = _dv_grid_dims()
+    n_ix, n_iz, _, _, _ = _dv_grid_dims(grid_spacing)
     return n_ix * n_iz
 
 
-def _smooth_dv(arr, n_ix, n_iz, passes=1):
+def get_dv_coords(grid_spacing: float = None) -> np.ndarray:
     """
-    Box-blur the DV grid to prevent adjacent grid points from differing too
-    sharply. Without this, CMA-ES candidates can create surface slopes where
-    inner and outer faces intersect, causing TetGen segfaults.
-    One pass reduces the max adjacent diff by ~60% while preserving the
-    overall spatial structure the optimizer is learning.
+    Return the real (x, z) spatial coordinates for each DV, in mm.
+
+    The returned array has shape (n, 2) where n == get_dv_shape().
+    Row i corresponds to dv[i], with columns [x_mm, z_mm].
+
+    The grid is symmetric: ix >= 0 maps to x = ix * grid_spacing.
+    iz <= -1 maps to z = iz * grid_spacing (negative = into the well).
+    ix varies fastest (same layout as the flat DV vector).
+
+    Parameters
+    ----------
+    grid_spacing : float, optional
+        Spacing (mm) of the perturbation grid.  If None, uses
+        ccb.GRID_SPACING (the module-level default, 25.0 mm).
     """
-    g = arr.reshape(n_iz, n_ix).astype(float).copy()
-    for _ in range(passes):
-        s = g.copy()
-        g[1:-1,1:-1] = (s[1:-1,1:-1]+s[:-2,1:-1]+s[2:,1:-1]+s[1:-1,:-2]+s[1:-1,2:])/5.0
-        g[0,  1:-1]  = (s[0,1:-1] +s[1,1:-1] +s[0,:-2] +s[0,2:])  /4.0
-        g[-1, 1:-1]  = (s[-1,1:-1]+s[-2,1:-1]+s[-1,:-2]+s[-1,2:]) /4.0
-        g[1:-1,  0]  = (s[1:-1,0] +s[1:-1,1] +s[:-2,0] +s[2:,0])  /4.0
-        g[1:-1, -1]  = (s[1:-1,-1]+s[1:-1,-2]+s[:-2,-1]+s[2:,-1]) /4.0
-        g[0,0]=(s[0,0]+s[1,0]+s[0,1])/3.0;    g[0,-1]=(s[0,-1]+s[1,-1]+s[0,-2])/3.0
-        g[-1,0]=(s[-1,0]+s[-2,0]+s[-1,1])/3.0; g[-1,-1]=(s[-1,-1]+s[-2,-1]+s[-1,-2])/3.0
-    return g.ravel()
+    n_ix, n_iz, ix_list, iz_list, gs = _dv_grid_dims(grid_spacing)
+    coords = np.empty((n_ix * n_iz, 2), dtype=np.float64)
+    idx = 0
+    for iz in iz_list:
+        for ix in ix_list:
+            coords[idx, 0] = ix * gs   # x mm
+            coords[idx, 1] = iz * gs   # z mm
+            idx += 1
+    return coords
 
 
-def _dv_array_to_grid(dv_array, perturb_max):
+def _dv_array_to_grid(dv_array, perturb_max, grid_spacing: float = None):
     """
     Convert a flat DV array to the {(ix,iz): value} dict ccb expects.
-    Clips to [0, perturb_max] then applies one smoothing pass to prevent
-    surface self-intersections from steep DV gradients.
+    Values are clipped to [0, perturb_max].
+
+    Note on surface_mesh_size: to avoid inner/outer surface intersections
+    without smoothing, ensure:
+        surface_mesh_size < thickness/2 * grid_spacing / perturb_max
+    e.g. at grid_spacing=50, thickness=3, perturb_max=10: SMS < 7.5mm
     """
-    n_ix, n_iz, ix_list, iz_list = _dv_grid_dims()
+    n_ix, n_iz, ix_list, iz_list, gs = _dv_grid_dims(grid_spacing)
     expected = n_ix * n_iz
     dv_array = np.asarray(dv_array, dtype=float).ravel()
     if len(dv_array) != expected:
@@ -225,13 +251,11 @@ def _dv_array_to_grid(dv_array, perturb_max):
             f"({n_ix} ix × {n_iz} iz). Use get_dv_shape() to size it correctly."
         )
     dv_array = np.clip(dv_array, 0.0, perturb_max)
-    dv_array = _smooth_dv(dv_array, n_ix, n_iz, passes=1)
     grid = {}
     for iz_idx, iz in enumerate(iz_list):
         for ix_idx, ix in enumerate(ix_list):
             grid[(ix, iz)] = float(dv_array[iz_idx * n_ix + ix_idx])
     return grid
-
 
 # =============================================================================
 # GEOMETRY
@@ -239,14 +263,18 @@ def _dv_array_to_grid(dv_array, perturb_max):
 def _build_solid_surface(cfg: FEAConfig, dv_grid, perturb_max):
     T = cfg.thickness
     orig_ms = ccb.MESH_SPACING
+    orig_gs = ccb.GRID_SPACING
     ccb.MESH_SPACING = float(cfg.surface_mesh_size)
+    ccb.GRID_SPACING = float(cfg.grid_spacing)
 
-    print(f"  Building geometry at {cfg.surface_mesh_size} mm surface mesh size...")
+    print(f"  Building geometry at {cfg.surface_mesh_size} mm surface mesh size, "
+          f"{cfg.grid_spacing} mm grid spacing...")
     main_shape = ccb.build_main_face()
     node_map, smooth_nodes, tris = ccb.triangulate_shape(main_shape)
     ccb.build_lip_mesh_grid(node_map, smooth_nodes, tris)
     N = len(smooth_nodes)
     ccb.MESH_SPACING = orig_ms
+    ccb.GRID_SPACING = orig_gs
 
     print(f"  Inner surface: {N} nodes, {len(tris)} triangles")
 
@@ -683,31 +711,46 @@ def _run_ccx(inp_path, ccx_cmd):
     print(r.stdout[-500:])
 
     BASE = 13
-    max_neg_y  = 0.0
-    max_nid    = None
-    in_disp    = False
-    d2_offset  = BASE + 12
-    comp_index = 0
+    max_neg_y     = 0.0
+    max_nid       = None
+    max_total_disp = 0.0
+    in_disp       = False
+    comp_index    = 0
+    # Track offsets for all three displacement components
+    d1_offset     = BASE + 0
+    d2_offset     = BASE + 12
+    d3_offset     = BASE + 24
 
     with open(frd_path, "r", errors="replace") as f:
         for line in f:
             if len(line) < 3: continue
             if line[1:3] == "-4" and "DISP" in line:
-                in_disp = True; comp_index = 0; d2_offset = BASE + 12; continue
+                in_disp = True
+                comp_index = 0
+                d1_offset = BASE + 0
+                d2_offset = BASE + 12
+                d3_offset = BASE + 24
+                continue
             if not in_disp: continue
             rec = line[1:3]
             if rec == "-5":
                 cn = line[4:12].strip()
                 if cn == "ALL": continue
-                if cn in ("D2", "U2"):
-                    d2_offset = BASE + comp_index * 12
+                if cn in ("D1", "U1"): d1_offset = BASE + comp_index * 12
+                if cn in ("D2", "U2"): d2_offset = BASE + comp_index * 12
+                if cn in ("D3", "U3"): d3_offset = BASE + comp_index * 12
                 comp_index += 1
             elif rec == "-1":
                 try:
+                    u1 = float(line[d1_offset:d1_offset+12])
                     u2 = float(line[d2_offset:d2_offset+12])
+                    u3 = float(line[d3_offset:d3_offset+12])
                     if u2 < max_neg_y:
                         max_neg_y = u2
                         max_nid   = int(line[3:13].strip())
+                    mag = math.sqrt(u1*u1 + u2*u2 + u3*u3)
+                    if mag > max_total_disp:
+                        max_total_disp = mag
                 except (ValueError, IndexError):
                     pass
             elif rec == "-3":
@@ -716,7 +759,7 @@ def _run_ccx(inp_path, ccx_cmd):
     if max_neg_y == 0.0:
         print("  WARNING: no negative Y displacement — check .frd file")
 
-    return max_neg_y, max_nid, frd_path
+    return max_neg_y, max_nid, max_total_disp, frd_path
 
 
 # =============================================================================
@@ -739,14 +782,15 @@ def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
     Returns
     -------
     dict:
-        "max_neg_y"  float | None    most negative Y displacement (mm)
-        "location"   tuple | None    (x, y, z) of that node (mm)
-        "dv"         np.ndarray      DV vector used (length get_dv_shape())
-        "inp"        str             absolute path to the .inp file
-        "frd"        str | None      absolute path to the .frd file
+        "max_neg_y"      float | None    most negative Y displacement (mm)
+        "max_total_disp" float | None    max displacement magnitude across all nodes (mm)
+        "location"       tuple | None    (x, y, z) of that node (mm)
+        "dv"             np.ndarray      DV vector used (length get_dv_shape())
+        "inp"            str             absolute path to the .inp file
+        "frd"            str | None      absolute path to the .frd file
     """
     dv_arr  = np.asarray(dv, dtype=float).ravel()
-    dv_grid = _dv_array_to_grid(dv_arr, cfg.perturb_max)
+    dv_grid = _dv_array_to_grid(dv_arr, cfg.perturb_max, cfg.grid_spacing)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     out = os.path.abspath(os.path.join(cfg.output_dir, f"{name}.inp"))
@@ -799,26 +843,29 @@ def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
     print("=" * 55)
 
     # Step 4 (optional) — run CalculiX
-    max_neg_y = None
-    location  = None
-    frd_path  = None
+    max_neg_y      = None
+    max_total_disp = None
+    location       = None
+    frd_path       = None
 
     if cfg.ccx:
-        max_neg_y, max_nid, frd_path = _run_ccx(out, cfg.ccx)
+        max_neg_y, max_nid, max_total_disp, frd_path = _run_ccx(out, cfg.ccx)
         if max_nid is not None and 1 <= max_nid <= len(nodes_arr):
             x, y, z  = nodes_arr[max_nid-1]
             location = (float(x), float(y), float(z))
         print(f"  Max -Y deflection: {max_neg_y:.6f} mm")
+        print(f"  Max total disp:    {max_total_disp:.6f} mm")
         if location:
             print(f"  Location:          ({location[0]:.1f}, "
                   f"{location[1]:.1f}, {location[2]:.1f}) mm")
 
     return {
-        "max_neg_y": max_neg_y,
-        "location":  location,
-        "dv":        dv_arr,
-        "inp":       out,
-        "frd":       frd_path,
+        "max_neg_y":      max_neg_y,
+        "max_total_disp": max_total_disp,
+        "location":       location,
+        "dv":             dv_arr,
+        "inp":            out,
+        "frd":            frd_path,
     }
 
 
