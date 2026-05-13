@@ -1,48 +1,53 @@
 """
 optimize_cover.py
 =================
-CMA-ES optimization of the window-well cover geometry to minimize maximum
-downward (-Y) deflection under a 200 N central load.
+SAASBO optimization of the window-well cover geometry to minimize maximum
+downward (-Y) deflection under a central load.
 
-Algorithm: CMA-ES (Covariance Matrix Adaptation Evolution Strategy)
-  - No gradient information required
-  - Handles ~1000s of continuous DVs effectively
-  - Self-adapts step size and search direction
-  - pip install cma
+Algorithm: SAASBO (Sparse Axis-Aligned Subspace Bayesian Optimisation)
+  - Builds a probabilistic surrogate (Gaussian Process) of the objective
+  - Actively balances exploration of new regions vs. exploitation of known good ones
+  - Specifically designed for expensive black-box functions with 10-100 DVs
+  - Far more sample-efficient than CMA-ES at this problem scale
+  - Requires: pip install botorch gpytorch torch
+
+The design variables are 2D Fourier AC coefficients (see cover_fea.py).
+The Fourier parameterisation guarantees the surface stays in [0, perturb_max]
+without any penalty term — SAASBO sees a clean, unconstrained objective.
 
 Usage
 -----
-    # Basic run with defaults
-    python optimize_cover.py --ccx ccx
+    # Basic run with defaults (64 DVs, 4x4 Fourier)
+    python optimize_cover.py
 
     # Resume from a checkpoint
-    python optimize_cover.py --ccx ccx --resume
+    python optimize_cover.py --resume
 
-    # Custom budget and output location
-    python optimize_cover.py --ccx ccx \\
-        --max-evals 500 --tol 1e-4 \\
-        --output-dir results/opt_run1 \\
-        --surface-mesh-size 25 --max-tet-vol 943
+    # Higher-order Fourier (more complex surfaces)
+    python optimize_cover.py --n-fourier-x 6 --n-fourier-z 6 --max-evals 400
 
-    # Start from a specific DV file (e.g. a known good design)
-    python optimize_cover.py --ccx ccx --dv-file starting_design.csv
+    # Finer geometry grid, same Fourier order
+    python optimize_cover.py --grid-spacing 15
 
-CMA-ES notes for high-dimensional problems
-------------------------------------------
-    At 3700 DVs, CMA-ES operates in a "large-scale" regime.
-    Default population size is ~50-70 (lambda = 4 + floor(3*ln(n))).
-    The full covariance matrix would be 3700x3700 — too large to store.
-    We use sep-CMA-ES (diagonal covariance) which scales as O(n) instead
-    of O(n²) and is recommended for n > ~100.  This sacrifices some
-    rotation invariance but handles large-scale problems well in practice.
+    # Start from a known good design
+    python optimize_cover.py --dv-file best_dv.csv
 
 Checkpointing
 -------------
-    After every generation the optimizer writes:
-      <output_dir>/cma_checkpoint.pkl  — full CMA-ES state (resume with --resume)
-      <output_dir>/history.csv         — generation, evals, best obj, best DV file
-      <output_dir>/best_dv.csv         — DV vector of the current best design
+    After every BO iteration the optimizer writes:
+      <output_dir>/bo_checkpoint.pkl   — full BO state (X, Y, best) for resume
+      <output_dir>/history.csv         — eval number, objective, best so far
+      <output_dir>/evals.csv           — every individual FEA evaluation
+      <output_dir>/best_dv.csv         — AC coefficients of the best design
       <output_dir>/best_result.json    — metadata of the best result so far
+      <output_dir>/opt_progress.png    — progress plot (requires matplotlib)
+
+SAASBO fitting time
+-------------------
+    The GP surrogate is refitted after every FEA evaluation using MCMC
+    (NUTS sampler).  Fitting takes ~1-3 min per iteration on CPU.
+    At 30s/FEA eval this overhead is modest.  On GPU it drops to ~10s.
+    Controlled by --mcmc-warmup and --mcmc-samples.
 """
 
 import argparse
@@ -53,12 +58,27 @@ import sys
 import time
 from pathlib import Path
 
-import cma
 import numpy as np
+import torch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 from cover_fea import FEAConfig, get_dv_shape, evaluate_fourier_surface, _grid_extent, run as fea_run
+
+# BoTorch / GPyTorch imports — informative error if not installed
+try:
+    from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+    from botorch.fit import fit_fully_bayesian_model_nuts
+    from botorch.acquisition.logei import qLogExpectedImprovement
+    from botorch.optim import optimize_acqf
+    from botorch.utils.transforms import normalize, unnormalize
+except ImportError as _botorch_err:
+    raise ImportError(
+        "BoTorch is required for SAASBO.\n"
+        "Install with:\n"
+        "  pip install botorch gpytorch torch\n"
+        f"Original error: {_botorch_err}"
+    ) from _botorch_err
 
 PENALTY = 9999.0 # mm - larger than any physically realistic deflection
 
@@ -77,13 +97,11 @@ def print_fourier_stats(ac_coeffs: np.ndarray, cfg: FEAConfig) -> None:
         ac_coeffs, xx, zz, L_x, L_z,
         cfg.n_fourier_x, cfg.n_fourier_z, cfg.perturb_max
     )
-    ac_budget = cfg.perturb_max / 2.0
-    l1_norm   = float(np.sum(np.abs(ac_coeffs)))
     print(f"  Fourier surface stats:")
     print(f"    n_fourier_x={cfg.n_fourier_x}, n_fourier_z={cfg.n_fourier_z}  "
           f"({get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)} DVs)")
-    print(f"    AC L1 norm: {l1_norm:.3f} / {ac_budget:.3f} budget "
-          f"({'normalised' if l1_norm > ac_budget else 'within budget'})")
+    print(f"    Coeff range: [{ac_coeffs.min():.3f}, {ac_coeffs.max():.3f}] mm  "
+          f"L1={float(np.sum(np.abs(ac_coeffs))):.2f} mm")
     print(f"    Height range: [{heights.min():.2f}, {heights.max():.2f}] mm  "
           f"(max allowed: {cfg.perturb_max:.2f} mm)")
     print(f"    Mean: {heights.mean():.2f} mm  Std: {heights.std():.2f} mm")
@@ -130,44 +148,58 @@ def objective(dv: np.ndarray,
 # =============================================================================
 # CHECKPOINT HELPERS
 # =============================================================================
-def save_checkpoint(es, output_dir):
-    path = os.path.join(output_dir, "cma_checkpoint.pkl")
+def save_bo_checkpoint(output_dir, X, Y, best_obj, best_dv, total_evals):
+    """Save full BO state so a run can be resumed."""
+    path = os.path.join(output_dir, "bo_checkpoint.pkl")
     with open(path, "wb") as f:
-        pickle.dump(es, f)
+        pickle.dump({
+            "X": X.cpu().numpy(),
+            "Y": Y.cpu().numpy(),
+            "best_obj":    best_obj,
+            "best_dv":     best_dv,
+            "total_evals": total_evals,
+        }, f)
 
 
-def load_checkpoint(output_dir):
-    path = os.path.join(output_dir, "cma_checkpoint.pkl")
+def load_bo_checkpoint(output_dir):
+    path = os.path.join(output_dir, "bo_checkpoint.pkl")
     if not os.path.exists(path):
-        raise FileNotFoundError(f"No checkpoint found at {path}")
+        raise FileNotFoundError(f"No BO checkpoint found at {path}")
     with open(path, "rb") as f:
-        return pickle.load(f)
+        d = pickle.load(f)
+    return (
+        torch.tensor(d["X"], dtype=torch.double),
+        torch.tensor(d["Y"], dtype=torch.double),
+        d["best_obj"],
+        d["best_dv"],
+        d["total_evals"],
+    )
 
 
-def save_history(output_dir, generation, total_evals, best_obj, best_run_name):
-    """Append one row per generation (best so far)."""
+def save_history(output_dir, total_evals, obj_val, best_obj, run_name):
+    """Append one row per FEA evaluation."""
     path = os.path.join(output_dir, "history.csv")
     write_header = not os.path.exists(path)
     with open(path, "a") as f:
         if write_header:
-            f.write("generation,total_evals,best_deflection_mm,best_run\n")
-        f.write(f"{generation},{total_evals},{best_obj:.6f},{best_run_name}\n")
+            f.write("total_evals,deflection_mm,best_deflection_mm,run_name\n")
+        f.write(f"{total_evals},{obj_val:.6f},{best_obj:.6f},{run_name}\n")
 
 
-def save_eval(output_dir, generation, eval_num, run_name, obj_val, failed=False):
+def save_eval(output_dir, eval_num, run_name, obj_val, failed=False):
     """Append one row per individual FEA evaluation to evals.csv."""
     path = os.path.join(output_dir, "evals.csv")
     write_header = not os.path.exists(path)
     with open(path, "a") as f:
         if write_header:
-            f.write("generation,eval_num,run_name,deflection_mm,failed\n")
+            f.write("eval_num,run_name,deflection_mm,failed\n")
         val_str = "failed" if failed else f"{obj_val:.6f}"
-        f.write(f"{generation},{eval_num},{run_name},{val_str},{int(failed)}\n")
+        f.write(f"{eval_num},{run_name},{val_str},{int(failed)}\n")
 
 
 def plot_progress(output_dir):
     """
-    Regenerate opt_progress.png after each generation showing:
+    Regenerate opt_progress.png showing:
       Top:    every individual FEA result (scatter), failed runs marked
       Bottom: best-so-far deflection stepping down over evaluations
     Silently skips if matplotlib is unavailable.
@@ -185,11 +217,10 @@ def plot_progress(output_dir):
     if not os.path.exists(evals_path):
         return
 
-    evals, gens, vals, failed_mask = [], [], [], []
+    eval_nums, vals, failed_mask = [], [], []
     with open(evals_path) as f:
         for row in csv.DictReader(f):
-            evals.append(int(row["eval_num"]))
-            gens.append(int(row["generation"]))
+            eval_nums.append(int(row["eval_num"]))
             failed_mask.append(row["failed"] == "1")
             vals.append(None if row["failed"] == "1"
                         else float(row["deflection_mm"]))
@@ -202,11 +233,11 @@ def plot_progress(output_dir):
                 hist_best.append(float(row["best_deflection_mm"]))
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    fig.suptitle("CMA-ES Cover Optimization Progress", fontsize=13)
+    fig.suptitle("SAASBO Cover Optimization Progress", fontsize=13)
 
-    ok_x   = [e for e, v, f in zip(evals, vals, failed_mask) if not f]
-    ok_y   = [v for v, f    in zip(vals, failed_mask)         if not f]
-    fail_x = [e for e, f    in zip(evals, failed_mask)         if f]
+    ok_x   = [e for e, v, f in zip(eval_nums, vals, failed_mask) if not f]
+    ok_y   = [v for v, f    in zip(vals, failed_mask)             if not f]
+    fail_x = [e for e, f    in zip(eval_nums, failed_mask)        if f]
     y_max  = max(ok_y) * 1.08 if ok_y else 1.0
     fail_y = [y_max] * len(fail_x)
 
@@ -218,14 +249,6 @@ def plot_progress(output_dir):
     ax1.set_title("All evaluations")
     ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
-
-    # Generation boundary lines
-    gen_starts = {}
-    for e, g in zip(evals, gens):
-        gen_starts.setdefault(g, e)
-    for g, e in sorted(gen_starts.items())[1:]:
-        ax1.axvline(e - 0.5, color="gray", lw=0.5, ls="--", alpha=0.5)
-        ax2.axvline(e - 0.5, color="gray", lw=0.5, ls="--", alpha=0.5)
 
     if hist_evals:
         ax2.step(hist_evals, hist_best, where="post",
@@ -242,7 +265,7 @@ def plot_progress(output_dir):
     out = os.path.join(output_dir, "opt_progress.png")
     plt.savefig(out, dpi=120, bbox_inches="tight")
     plt.close()
-    print(f"  Plot saved: {out}")
+
 def save_best(output_dir, dv, result, obj_value):
     # DV vector
     np.savetxt(
@@ -264,10 +287,13 @@ def save_best(output_dir, dv, result, obj_value):
 
 
 # =============================================================================
-# MAIN OPTIMIZER
+# MAIN OPTIMIZER  (SAASBO)
 # =============================================================================
 def optimize(args):
     os.makedirs(args.output_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype  = torch.double
+    print(f"  Using device: {device}")
 
     # ── FEA configuration ─────────────────────────────────────────────────
     cfg = FEAConfig(
@@ -288,168 +314,187 @@ def optimize(args):
         output_dir        = args.output_dir,
     )
 
-    n = get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)
-    # CMA-ES optimises raw AC coefficients in unconstrained space.
-    # The Fourier evaluator normalises them; bounds here guide initialisation.
+    n         = get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)
     ac_budget = cfg.perturb_max / 2.0
+
+    # Each Fourier coefficient is bounded to [-perturb_max/2, +perturb_max/2].
+    # The surface is evaluated and then clipped to [0, perturb_max] in
+    # evaluate_fourier_surface — no pre-normalisation.  A single coefficient
+    # at full scale produces a sinusoidal variation of ±ac_budget around the
+    # DC offset, which exactly spans [0, perturb_max].  Multiple coefficients
+    # combine additively; the clip handles any exceedance.
     lb = -ac_budget
     ub =  ac_budget
 
+    # BoTorch works in [0,1]^n internally; we unnormalise before calling FEA
+    bounds_t = torch.tensor([[lb] * n, [ub] * n], dtype=dtype, device=device)
+
     print("=" * 60)
-    print("CMA-ES Cover Geometry Optimizer")
+    print("SAASBO Cover Geometry Optimizer")
     print("=" * 60)
-    print(f"  DVs:               {n}")
-    print(f"  DV bounds:         [{lb}, {ub}] mm")
-    print(f"  Max evaluations:   {args.max_evals}")
-    print(f"  Convergence tol:   {args.tol}")
-    print(f"  Output dir:        {args.output_dir}")
-    print(f"  Fourier order:     {cfg.n_fourier_x} x {cfg.n_fourier_z}  ({n} DVs)")
-    print(f"  Grid spacing:      {cfg.grid_spacing} mm  (perturbation evaluation density)")
-    print(f"  Surface mesh size: {cfg.surface_mesh_size} mm")
+    print(f"  DVs:               {n}  ({cfg.n_fourier_x}x{cfg.n_fourier_z} Fourier x 4)")
+    print(f"  AC coefficient bounds: [{lb:.2f}, {ub:.2f}] mm  (= ±perturb_max/2 per coeff)")
     print(f"  Perturb max:       {cfg.perturb_max} mm  "
-          f"(DC={cfg.perturb_max/2:.1f} mm, AC budget={cfg.perturb_max/2:.1f} mm)")
+          f"(DC={ac_budget:.1f} mm, AC budget={ac_budget:.1f} mm)")
+    print(f"  Grid spacing:      {cfg.grid_spacing} mm")
+    print(f"  Surface mesh size: {cfg.surface_mesh_size} mm")
+    print(f"  Max evaluations:   {args.max_evals}")
+    print(f"  Initial samples:   {args.n_init}")
+    print(f"  MCMC warmup/samples: {args.mcmc_warmup}/{args.mcmc_samples}")
+    print(f"  Output dir:        {args.output_dir}")
     print(f"  Max tet volume:    {cfg.max_tet_vol}")
-    print(f"  Load:              {cfg.load_force} N at Z={cfg.load_z}, r={cfg.load_radius} mm")
+    print(f"  Load:              {cfg.load_force} N at Z={cfg.load_z}, "
+          f"r={cfg.load_radius} mm")
     print("=" * 60)
 
-    # ── Initial DV vector ─────────────────────────────────────────────────
+    # ── Resume or initialise ──────────────────────────────────────────────
     if args.resume:
         print("\nResuming from checkpoint...")
-        es = load_checkpoint(args.output_dir)
-        total_evals  = es.result.evaluations
-        generation   = es.result.iterations
-        # Load best known result from disk
-        best_json = os.path.join(args.output_dir, "best_result.json")
-        if os.path.exists(best_json):
-            with open(best_json) as f:
-                meta = json.load(f)
-            best_obj     = meta["deflection_mm"]
-            best_dv      = np.loadtxt(
-                os.path.join(args.output_dir, "best_dv.csv"), delimiter=","
-            )
-            best_result  = meta
-            best_run     = meta.get("inp", "?")
-        else:
-            best_obj    = np.inf
-            best_dv     = None
-            best_result = None
-            best_run    = "?"
-        print(f"  Resumed at generation {generation}, {total_evals} evals, "
-              f"best={best_obj:.4f} mm")
+        X, Y, best_obj, best_dv, total_evals = load_bo_checkpoint(args.output_dir)
+        X = X.to(device=device, dtype=dtype)
+        Y = Y.to(device=device, dtype=dtype)
+        best_result = None   # metadata not needed for resuming
+        print(f"  Resumed: {total_evals} evals done, best={best_obj:.4f} mm")
     else:
-        if args.dv_file:
-            print(f"\nLoading initial AC coefficients from {args.dv_file}...")
-            x0 = np.loadtxt(args.dv_file, delimiter=",")
-            if x0.shape != (n,):
-                raise ValueError(
-                    f"DV file has {x0.shape} values, expected ({n},). "
-                    f"Use get_dv_shape(n_fourier_x, n_fourier_z) to check."
-                )
-        else:
-            print(f"\nGenerating random initial AC coefficients (seed={args.seed})...")
-            # Small coefficients near zero — DC offset handles the mean level
-            x0 = np.random.default_rng(args.seed).uniform(
-                -ac_budget * 0.1, ac_budget * 0.1, n)
+        # ── Initial random samples (Latin-hypercube-like via Sobol) ──────
+        n_init = min(args.n_init, args.max_evals)
+        print(f"\nGenerating {n_init} initial samples (Sobol, seed={args.seed})...")
+        sobol   = torch.quasirandom.SobolEngine(n, scramble=True, seed=args.seed)
+        X_unit  = sobol.draw(n_init).to(device=device, dtype=dtype)
+        X       = unnormalize(X_unit, bounds_t)   # shape (n_init, n)
+        Y       = torch.full((n_init, 1), float("nan"), dtype=dtype, device=device)
 
-        # Initial step size: fraction of the AC budget
-        sigma0 = ac_budget * args.sigma_frac
+        best_obj    = float("inf")
+        best_dv     = None
+        best_result = None
+        total_evals = 0
 
-        # CMA-ES options
-        # Use sep-CMA-ES (diagonal covariance) for large n
-        cma_opts = cma.CMAOptions()
-        cma_opts["bounds"]         = [lb, ub]
-        cma_opts["maxfevals"]      = args.max_evals
-        cma_opts["tolx"]           = args.tol
-        cma_opts["tolfun"]         = args.tol
-        cma_opts["verbose"]        = 1
-        cma_opts["CMA_diagonal"]   = True   # sep-CMA-ES: O(n) covariance
-        cma_opts["seed"]           = args.seed
-        # Population size: default is fine (lambda ~ 4 + 3*ln(n) ~ 50-70 for n=3700)
-        # Increase if you want more exploration per generation
-        if args.popsize:
-            cma_opts["popsize"] = args.popsize
-
-        es = cma.CMAEvolutionStrategy(x0, sigma0, cma_opts)
-
-        total_evals  = 0
-        generation   = 0
-        best_obj     = np.inf
-        best_dv      = None
-        best_result  = None
-        best_run     = "?"
-
-    # ── Main loop ─────────────────────────────────────────────────────────
-    print(f"\nStarting optimization loop...")
-    print(f"  Population size (lambda): {es.popsize}")
-    print()
-
-    t_start = time.time()
-
-    while not es.stop():
-        generation += 1
-        candidates = es.ask()   # list of lambda DV vectors
-
-        print(f"── Generation {generation}  "
-              f"(evals so far: {total_evals}) ──────────────────")
-
-        fitnesses = []
-        for i, dv_candidate in enumerate(candidates):
-            # Clip to bounds (CMA-ES can occasionally propose out-of-bounds)
-            dv_clipped = np.clip(dv_candidate, lb, ub)
-
-            run_name = f"gen{generation:04d}_eval{total_evals+1:05d}"
-            print(f"  [{i+1:2d}/{len(candidates)}] {run_name} ...", end=" ", flush=True)
-
+        print(f"\nRunning {n_init} initial FEA evaluations...")
+        for i in range(n_init):
+            dv_np    = X[i].cpu().numpy()
+            run_name = f"init_{total_evals+1:05d}"
+            print(f"  [{i+1:3d}/{n_init}] {run_name} ...", end=" ", flush=True)
             t0 = time.time()
             try:
-                obj_val, result = objective(dv_clipped, cfg, run_name)
+                obj_val, result = objective(dv_np, cfg, run_name)
                 elapsed = time.time() - t0
                 print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
-
+                Y[i, 0] = obj_val
                 if obj_val < best_obj:
                     best_obj    = obj_val
-                    best_dv     = dv_clipped.copy()
+                    best_dv     = dv_np.copy()
                     best_result = result
-                    best_run    = run_name
                     save_best(args.output_dir, best_dv, best_result, best_obj)
                     print(f"    *** New best: {best_obj:.4f} mm ***")
-                save_eval(args.output_dir, generation, total_evals + 1,
-                          run_name, obj_val, failed=False)
-
             except Exception as e:
                 print(f"FAILED: {e}")
-                # Penalise failed runs heavily so CMA-ES avoids that region
-                save_eval(args.output_dir, generation, total_evals + 1,
-                          run_name, 1e6, failed=True)
-                save_eval(args.output_dir, generation, total_evals + 1,
-                          run_name, 1e6, failed=True)
-                obj_val = 1e6
+                Y[i, 0] = PENALTY
+                obj_val = PENALTY
                 result  = None
-
-            fitnesses.append(obj_val)
+            save_eval(args.output_dir, total_evals + 1, run_name, obj_val,
+                      failed=(obj_val >= PENALTY))
+            save_history(args.output_dir, total_evals + 1, obj_val, best_obj, run_name)
             total_evals += 1
 
-        # Tell CMA-ES the fitness values (uses the ORIGINAL un-clipped vectors
-        # so its internal model stays consistent)
-        es.tell(candidates, fitnesses)
-        es.disp()
+        # Replace any NaN/penalty inits with the observed max so GP isn't confused
+        Y_clean = Y.clone()
+        bad = ~torch.isfinite(Y_clean) | (Y_clean >= PENALTY)
+        if bad.any():
+            Y_clean[bad] = Y_clean[~bad].max() if (~bad).any() else torch.tensor(PENALTY)
+        Y = Y_clean
 
-        # Save checkpoint after every generation
-        save_checkpoint(es, args.output_dir)
-        save_history(args.output_dir, generation, total_evals, best_obj, best_run)
+        save_bo_checkpoint(args.output_dir, X, Y, best_obj, best_dv, total_evals)
         plot_progress(args.output_dir)
+
+    # ── BO loop ───────────────────────────────────────────────────────────
+    print(f"\nStarting SAASBO loop ({args.max_evals - total_evals} iterations remaining)...")
+    t_start = time.time()
+
+    while total_evals < args.max_evals:
+        iter_num = total_evals + 1
+        print(f"\n── BO iteration {iter_num}/{args.max_evals} "
+              f"(best so far: {best_obj:.4f} mm) ──")
+
+        # ── Fit surrogate ────────────────────────────────────────────────
+        print(f"  Fitting SAAS GP surrogate "
+              f"(warmup={args.mcmc_warmup}, samples={args.mcmc_samples})...")
+        t_fit = time.time()
+
+        # Normalise X to [0,1]^n for GP, standardise Y to zero mean/unit var
+        X_norm = normalize(X, bounds_t)
+        Y_mean = Y.mean()
+        Y_std  = Y.std().clamp(min=1e-6)
+        Y_norm = (Y - Y_mean) / Y_std
+
+        model = SaasFullyBayesianSingleTaskGP(
+            train_X = X_norm,
+            train_Y = Y_norm,
+        )
+        fit_fully_bayesian_model_nuts(
+            model,
+            warmup_steps = args.mcmc_warmup,
+            num_samples  = args.mcmc_samples,
+            thinning     = 16,
+            disable_progbar = not args.verbose_mcmc,
+        )
+        model.eval()
+        print(f"  GP fitted in {time.time()-t_fit:.0f}s")
+
+        # ── Optimise acquisition function ────────────────────────────────
+        # qLogEI in normalised Y space; best_f is the standardised incumbent
+        best_f_norm = (torch.tensor(best_obj, dtype=dtype, device=device) - Y_mean) / Y_std
+        acqf = qLogExpectedImprovement(model=model, best_f=best_f_norm)
+
+        unit_bounds = torch.stack([
+            torch.zeros(n, dtype=dtype, device=device),
+            torch.ones( n, dtype=dtype, device=device),
+        ])
+        candidate_norm, acqf_val = optimize_acqf(
+            acq_function = acqf,
+            bounds       = unit_bounds,
+            q            = 1,
+            num_restarts = args.acqf_restarts,
+            raw_samples  = args.acqf_raw_samples,
+        )
+        candidate = unnormalize(candidate_norm, bounds_t)   # shape (1, n)
+        print(f"  Acquisition value: {acqf_val.item():.4f}")
+
+        # ── Evaluate candidate ───────────────────────────────────────────
+        dv_np    = candidate[0].cpu().numpy()
+        run_name = f"bo_{total_evals+1:05d}"
+        print(f"  Evaluating {run_name} ...", end=" ", flush=True)
+        t0 = time.time()
+        try:
+            obj_val, result = objective(dv_np, cfg, run_name)
+            elapsed = time.time() - t0
+            print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
+            if obj_val < best_obj:
+                best_obj    = obj_val
+                best_dv     = dv_np.copy()
+                best_result = result
+                save_best(args.output_dir, best_dv, best_result, best_obj)
+                print(f"    *** New best: {best_obj:.4f} mm ***")
+        except Exception as e:
+            print(f"FAILED: {e}")
+            obj_val = PENALTY
+            result  = None
+
+        # ── Update observed data ──────────────────────────────────────────
+        new_y = torch.tensor([[obj_val if obj_val < PENALTY else best_obj]],
+                             dtype=dtype, device=device)
+        X = torch.cat([X, candidate.to(device)])
+        Y = torch.cat([Y, new_y])
+
+        total_evals += 1
+        save_eval(args.output_dir, total_evals, run_name, obj_val,
+                  failed=(obj_val >= PENALTY))
+        save_history(args.output_dir, total_evals, obj_val, best_obj, run_name)
+        save_bo_checkpoint(args.output_dir, X, Y, best_obj, best_dv, total_evals)
         plot_progress(args.output_dir)
 
         elapsed_total = time.time() - t_start
-        print(f"  Generation {generation} done. "
-              f"Best so far: {best_obj:.4f} mm  "
-              f"(sigma={es.sigma:.4f}, "
-              f"elapsed={elapsed_total/60:.1f} min)\n")
-
-        # Manual eval budget check (CMA-ES also checks maxfevals internally)
-        if total_evals >= args.max_evals:
-            print(f"Reached max evaluations ({args.max_evals}). Stopping.")
-            break
+        print(f"  Iteration done. Best: {best_obj:.4f} mm  "
+              f"(elapsed: {elapsed_total/60:.1f} min)")
 
     # ── Final report ──────────────────────────────────────────────────────
     elapsed_total = time.time() - t_start
@@ -457,16 +502,15 @@ def optimize(args):
     print("=" * 60)
     print("Optimization complete")
     print("=" * 60)
-    print(f"  Generations:       {generation}")
     print(f"  Total evaluations: {total_evals}")
     print(f"  Total time:        {elapsed_total/60:.1f} min")
     print(f"  Best deflection:   {best_obj:.4f} mm")
     if best_result and best_result.get("location"):
         loc = best_result["location"]
         print(f"  Location:          ({loc[0]:.1f}, {loc[1]:.1f}, {loc[2]:.1f}) mm")
-    print(f"  Best run:          {best_run}")
     print(f"  Best DV saved:     {args.output_dir}/best_dv.csv")
-    print(f"  Best .frd:         {best_result.get('frd','?') if best_result else '?'}")
+    if best_result:
+        print(f"  Best .frd:         {best_result.get('frd', '?')}")
     print(f"  History:           {args.output_dir}/history.csv")
     if best_dv is not None:
         print_fourier_stats(best_dv, cfg)
@@ -482,24 +526,41 @@ def main():
     cfg_default = FEAConfig()
 
     p = argparse.ArgumentParser(
-        description="CMA-ES optimization of cover geometry to minimize deflection.",
+        description="SAASBO optimization of cover geometry to minimize deflection.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Optimizer
-    p.add_argument("--max-evals",   type=int,   default=300,
-                   help="Maximum total FEA evaluations")
-    p.add_argument("--tol",         type=float, default=1e-4,
-                   help="Convergence tolerance on both DV change and objective change")
-    p.add_argument("--sigma-frac",  type=float, default=0.3,
-                   help="Initial step size as fraction of DV range [0, perturb_max]")
-    p.add_argument("--popsize",     type=int,   default=None,
-                   help="CMA-ES population size (default: 4 + floor(3*ln(n)) ≈ 50-70)")
-    p.add_argument("--seed",        type=int,   default=42)
-    p.add_argument("--resume",      action="store_true",
+    # ── Optimizer ────────────────────────────────────────────────────────────
+    p.add_argument("--max-evals",    type=int,   default=300,
+                   help="Maximum total FEA evaluations (including initial samples)")
+    p.add_argument("--n-init",       type=int,   default=None,
+                   help="Number of initial random samples before BO starts. "
+                        "Default: 2 * n_dvs (recommended minimum for GP fitting).")
+    p.add_argument("--seed",         type=int,   default=42,
+                   help="Random seed for Sobol initial samples")
+    p.add_argument("--resume",       action="store_true",
                    help="Resume from checkpoint in --output-dir")
-    p.add_argument("--dv-file",     default=None,
-                   help="CSV file of initial DV values (default: random)")
+    p.add_argument("--dv-file",      default=None,
+                   help="CSV file of initial AC Fourier coefficients. "
+                        "If provided, used as the first evaluation point "
+                        "before random Sobol samples fill out n_init.")
+
+    # ── MCMC / surrogate ─────────────────────────────────────────────────────
+    p.add_argument("--mcmc-warmup",   type=int,   default=256,
+                   help="NUTS MCMC warmup steps for GP fitting. "
+                        "Lower (e.g. 128) to speed up; raise for better mixing.")
+    p.add_argument("--mcmc-samples",  type=int,   default=128,
+                   help="NUTS MCMC samples for GP fitting. "
+                        "Lower (e.g. 64) to speed up; raise for more accuracy.")
+    p.add_argument("--acqf-restarts", type=int,   default=10,
+                   help="Number of restarts when optimising the acquisition function. "
+                        "Higher = better candidate but slower.")
+    p.add_argument("--acqf-raw-samples", type=int, default=256,
+                   help="Raw samples for acquisition function initialisation.")
+    p.add_argument("--verbose-mcmc",  action="store_true",
+                   help="Show MCMC progress bar during GP fitting.")
+
+    # ── Fourier parameterisation ──────────────────────────────────────────────
     p.add_argument("--n-fourier-x",   type=int,   default=cfg_default.n_fourier_x,
                    help="Fourier frequency steps along X. "
                         "Total DVs = n_fourier_x * n_fourier_z * 4. "
@@ -508,40 +569,52 @@ def main():
                    help="Fourier frequency steps along Z. "
                         "Total DVs = n_fourier_x * n_fourier_z * 4. "
                         "n=4 → up to 3 full cycles along part depth.")
+    p.add_argument("--perturb-max",   type=float, default=cfg_default.perturb_max,
+                   help="Maximum perturbation height (mm). Surface guaranteed in "
+                        "[0, perturb_max] via DC offset + AC budget normalisation.")
+    p.add_argument("--grid-spacing",  type=float, default=cfg_default.grid_spacing,
+                   help="Spacing (mm) of the perturbation evaluation grid. "
+                        "Independent of Fourier order — same function, different density.")
 
-    # FEA config
+    # ── FEA / mesh ────────────────────────────────────────────────────────────
     p.add_argument("--ccx",               default=cfg_default.ccx,
-                   help="Path to CalculiX executable (default: hardcoded path in FEAConfig)")
+                   help="Path to CalculiX executable (default: hardcoded in FEAConfig)")
     p.add_argument("--output-dir",        default="opt_results")
     p.add_argument("--surface-mesh-size", type=float,
-                   default=cfg_default.surface_mesh_size)
+                   default=cfg_default.surface_mesh_size,
+                   help="Surface triangle edge length (mm) fed to TetGen")
     p.add_argument("--max-tet-vol",       type=float,
-                   default=cfg_default.max_tet_vol)
+                   default=cfg_default.max_tet_vol,
+                   help="Maximum tetrahedron volume (mm³)")
     p.add_argument("--min-tet-quality",   type=float,
-                   default=cfg_default.min_tet_quality)
+                   default=cfg_default.min_tet_quality,
+                   help="TetGen radius/edge ratio limit (lower = better quality)")
     p.add_argument("--thickness",         type=float,
-                   default=cfg_default.thickness)
-    p.add_argument("--load-z",            type=float,
-                   default=cfg_default.load_z)
-    p.add_argument("--load-radius",       type=float,
-                   default=cfg_default.load_radius)
-    p.add_argument("--load-force",        type=float,
-                   default=cfg_default.load_force)
-    p.add_argument("--perturb-max",       type=float,
-                   default=cfg_default.perturb_max)
-    p.add_argument("--grid-spacing",      type=float,
-                   default=cfg_default.grid_spacing,
-                   help="Spacing (mm) of the DV perturbation grid. "
-                        "Smaller = more DVs, finer shape control, slower convergence. "
-                        f"Default: {cfg_default.grid_spacing} mm "
-                        "(matches create_cover_blend.py GRID_SPACING).")
+                   default=cfg_default.thickness,
+                   help="Wall thickness (mm)")
     p.add_argument("--solver",            default=cfg_default.solver,
-                   choices=["SPOOLES", "Pardiso"])
+                   choices=["SPOOLES", "Pardiso"],
+                   help="CalculiX solver")
     p.add_argument("--tet-timeout",       type=int,
                    default=cfg_default.tet_timeout,
-                   help="Seconds before killing a hung TetGen call (default 300)")
+                   help="Seconds before killing a hung TetGen call")
+
+    # ── Load ──────────────────────────────────────────────────────────────────
+    p.add_argument("--load-z",      type=float, default=cfg_default.load_z,
+                   help="Z coordinate of load circle centre (mm, negative = into well)")
+    p.add_argument("--load-radius", type=float, default=cfg_default.load_radius,
+                   help="Radius of circular load patch (mm)")
+    p.add_argument("--load-force",  type=float, default=cfg_default.load_force,
+                   help="Total downward force (N)")
 
     args = p.parse_args()
+
+    # Default n_init to 2 * n_dvs if not specified
+    n_dvs = get_dv_shape(args.n_fourier_x, args.n_fourier_z)
+    if args.n_init is None:
+        args.n_init = 2 * n_dvs
+        print(f"  n_init not specified — defaulting to 2 × {n_dvs} DVs = {args.n_init}")
+
     optimize(args)
 
 

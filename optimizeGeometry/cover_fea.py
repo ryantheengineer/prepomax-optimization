@@ -251,9 +251,11 @@ def evaluate_fourier_surface(ac_coeffs: np.ndarray,
                                   + C·sin(mx·πx/Lx)·cos(mz·πz/Lz)
                                   + D·sin(mx·πx/Lx)·sin(mz·πz/Lz)]
 
-    where DC = perturb_max / 2  (fixed offset so the mean is mid-range)
-    and the AC coefficients are normalised so their L1 norm ≤ perturb_max/2,
-    guaranteeing h ∈ [0, perturb_max] everywhere without any clamping.
+    where DC = perturb_max / 2  (fixed offset so the mean is mid-range).
+    The AC coefficients are used as-is from the optimizer.  After evaluation
+    the result is clipped to [0, perturb_max].  Any clipping that occurs is
+    recorded as a saturation — the optimizer will naturally avoid heavily
+    clipped regions since they waste coefficient budget.
 
     Parameters
     ----------
@@ -278,13 +280,13 @@ def evaluate_fourier_surface(ac_coeffs: np.ndarray,
             f"Use get_dv_shape() to size the DV vector."
         )
 
-    # ── Normalise: project AC coefficients to L1 norm ≤ perturb_max/2 ─────
-    ac_budget = perturb_max / 2.0
-    l1_norm   = np.sum(np.abs(ac_coeffs))
-    if l1_norm > ac_budget:
-        ac_coeffs = ac_coeffs * (ac_budget / l1_norm)
-
     # ── Evaluate Fourier series ─────────────────────────────────────────────
+    # DC offset centres the surface at perturb_max/2 so the AC terms can
+    # swing both above and below.  The coefficients are used as-is — no
+    # pre-normalisation — because L1-normalising before evaluation was
+    # crushing all variation (the L1 bound is far too conservative in practice).
+    # After evaluation we clip to [0, perturb_max] which is the only hard
+    # constraint that actually matters.
     x_n = np.asarray(x_coords, dtype=np.float64)
     z_n = np.asarray(z_coords, dtype=np.float64)
     heights = np.full(len(x_n), perturb_max / 2.0)   # DC offset
@@ -302,7 +304,7 @@ def evaluate_fourier_surface(ac_coeffs: np.ndarray,
             heights += ac_coeffs[idx+3] * sx * sz   # sin/sin
             idx += 4
 
-    return heights   # guaranteed in [0, perturb_max]
+    return np.clip(heights, 0.0, perturb_max)
 
 
 def _fourier_to_grid(ac_coeffs: np.ndarray, cfg: "FEAConfig") -> dict:
