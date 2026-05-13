@@ -263,9 +263,12 @@ def _dv_array_to_grid(dv_array, perturb_max, grid_spacing: float = None):
 def _build_solid_surface(cfg: FEAConfig, dv_grid, perturb_max):
     T = cfg.thickness
     orig_ms = ccb.MESH_SPACING
-    orig_gs = ccb.GRID_SPACING
     ccb.MESH_SPACING = float(cfg.surface_mesh_size)
-    ccb.GRID_SPACING = float(cfg.grid_spacing)
+    # NOTE: ccb.GRID_SPACING is intentionally NOT set here.
+    # GRID_SPACING controls geometry tool placement in build_main_face() and
+    # triangulate_shape() — changing it here would corrupt the boundary geometry.
+    # The perturbation grid spacing is passed explicitly via cfg.grid_spacing
+    # to _dv_array_to_grid(), which is the only place it needs to take effect.
 
     print(f"  Building geometry at {cfg.surface_mesh_size} mm surface mesh size, "
           f"{cfg.grid_spacing} mm grid spacing...")
@@ -274,7 +277,6 @@ def _build_solid_surface(cfg: FEAConfig, dv_grid, perturb_max):
     ccb.build_lip_mesh_grid(node_map, smooth_nodes, tris)
     N = len(smooth_nodes)
     ccb.MESH_SPACING = orig_ms
-    ccb.GRID_SPACING = orig_gs
 
     print(f"  Inner surface: {N} nodes, {len(tris)} triangles")
 
@@ -295,7 +297,14 @@ def _build_solid_surface(cfg: FEAConfig, dv_grid, perturb_max):
     if dv_grid is not None and perturb_max > 0:
         print("  Applying perturbations...")
         pert = [list(n) for n in smooth_nodes]
+        # bilinear_interp() inside apply_perturbations reads ccb.GRID_SPACING
+        # directly to locate each node in the DV grid, so we must set it here.
+        # This is safe because geometry construction (build_main_face etc.) is
+        # already complete above — only the perturbation interpolation remains.
+        orig_gs = ccb.GRID_SPACING
+        ccb.GRID_SPACING = float(cfg.grid_spacing)
         ccb.apply_perturbations(pert, dv_grid)
+        ccb.GRID_SPACING = orig_gs
         dy = [pert[i][1] - smooth_nodes[i][1] for i in range(N)]
     else:
         dy = [0.0] * N
@@ -637,11 +646,14 @@ def _write_inp(output_path, nodes_arr, elems, cfg: FEAConfig,
       "*Boundary, op=New")
 
     # BCs — one *Boundary block per DOF
+    # The arc apex is the fully fixed point (pin): constrains X, Y, Z, rot-Y.
+    # Both flange corners are rollers: Y-displacement only.
+    # This gives a symmetric constraint layout about the cover centreline.
     bcs = [
         ("BC_PinRight",   cfg.bc_pin_right_xyz,
-         [(1,1,0.0),(2,2,0.0),(3,3,0.0),(5,5,0.0)]),
-        ("BC_RollerApex", cfg.bc_roller_apex_xyz,
          [(2,2,0.0)]),
+        ("BC_RollerApex", cfg.bc_roller_apex_xyz,
+         [(1,1,0.0),(2,2,0.0),(3,3,0.0),(5,5,0.0)]),
         ("BC_PinLeft",    cfg.bc_pin_left_xyz,
          [(2,2,0.0)]),
     ]
