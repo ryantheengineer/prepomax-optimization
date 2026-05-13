@@ -58,119 +58,53 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-from cover_fea import FEAConfig, get_dv_shape, get_dv_coords, run as fea_run
+from cover_fea import FEAConfig, get_dv_shape, evaluate_fourier_surface, _grid_extent, run as fea_run
 
 PENALTY = 9999.0 # mm - larger than any physically realistic deflection
 
 
 # =============================================================================
-# STRUCTURAL PENALTY
+# FOURIER SURFACE PREVIEW  (diagnostic helper, not used in objective)
 # =============================================================================
-def _build_fourier_basis(node_coords: np.ndarray, n_freq: int) -> np.ndarray:
-    """
-    Build a 2D cosine/sine Fourier basis over the DV grid coordinates.
-
-    Parameters
-    ----------
-    node_coords : (n, 2) array of (x_mm, z_mm) for each DV
-    n_freq      : number of frequency steps in each axis (0..n_freq-1)
-
-    Returns
-    -------
-    B : (n, n_basis) array  — each column is one basis function evaluated
-        at every DV location.  n_basis = 4 * n_freq^2.
-    """
-    x, z = node_coords[:, 0], node_coords[:, 1]
-    # Normalise to [0, 2π]
-    x_n = 2.0 * np.pi * (x - x.min()) / (np.ptp(x) + 1e-9)
-    z_n = 2.0 * np.pi * (z - z.min()) / (np.ptp(z) + 1e-9)
-    cols = []
-    for fx in range(n_freq):
-        for fz in range(n_freq):
-            cols.append(np.cos(fx * x_n) * np.cos(fz * z_n))
-            cols.append(np.cos(fx * x_n) * np.sin(fz * z_n))
-            cols.append(np.sin(fx * x_n) * np.cos(fz * z_n))
-            cols.append(np.sin(fx * x_n) * np.sin(fz * z_n))
-    return np.column_stack(cols)   # shape (n, 4*n_freq^2)
-
-
-# Cached basis matrix — recomputed only if n_freq changes.
-_BASIS_CACHE: dict = {}
-
-def structural_penalty(dv: np.ndarray,
-                       node_coords: np.ndarray,
-                       n_freq: int = 6) -> float:
-    """
-    Return a penalty in [0, 1] that is LOW when the DV pattern is dominated
-    by a small number of low-spatial-frequency modes (ribs, corrugations,
-    saddle shapes) and HIGH when the pattern is high-frequency noise.
-
-    Also includes a variance reward so the optimizer does not collapse to a
-    flat plate (which would trivially score 0 on the frequency penalty).
-
-    Parameters
-    ----------
-    dv          : flat DV array, length n
-    node_coords : (n, 2) real (x, z) coordinates in mm from get_dv_coords()
-    n_freq      : number of Fourier frequency steps per axis.
-                  n_freq=6 allows up to 5 full cycles across the part, which
-                  captures typical rib spacings without passing fine noise.
-
-    Returns
-    -------
-    penalty : float in roughly [0, 1]
-        0   → perfectly low-frequency (all energy in the kept basis)
-        1   → pure high-frequency noise, zero variance
-    """
-    global _BASIS_CACHE
-    if n_freq not in _BASIS_CACHE:
-        _BASIS_CACHE[n_freq] = _build_fourier_basis(node_coords, n_freq)
-    B = _BASIS_CACHE[n_freq]           # (n, n_basis)
-
-    # Project DV onto the low-frequency basis via least squares
-    coeffs, _, _, _ = np.linalg.lstsq(B, dv, rcond=None)
-    dv_lowfreq = B @ coeffs
-
-    # High-frequency energy fraction
-    residual    = dv - dv_lowfreq
-    dv_energy   = float(np.dot(dv, dv))
-    hf_fraction = float(np.dot(residual, residual)) / (dv_energy + 1e-9)
-
-    # Variance reward: penalise flat designs (low variance = near-zero DV energy)
-    # Normalise by max possible variance (all values at perturb_max/2 from mean)
-    dv_var     = float(np.var(dv))
-    max_var    = (np.ptp(node_coords) / 2.0) ** 2   # rough upper bound
-    flat_pen   = max(0.0, 1.0 - dv_var / (max_var + 1e-9))
-
-    # Combined: high-freq noise penalty + flat-plate penalty
-    # Both are in [0,1]; weight flat_pen less since it's a secondary concern.
-    return 0.8 * hf_fraction + 0.2 * flat_pen
-
-
+def print_fourier_stats(ac_coeffs: np.ndarray, cfg: FEAConfig) -> None:
+    """Print a quick summary of the Fourier surface. Useful after optimisation."""
+    ix_list, iz_list, x_coords, z_coords, L_x, L_z = _grid_extent(cfg.grid_spacing)
+    xx = np.array([ix * cfg.grid_spacing for iz in iz_list
+                                         for ix in ix_list], dtype=np.float64)
+    zz = np.array([iz * cfg.grid_spacing for iz in iz_list
+                                         for ix in ix_list], dtype=np.float64)
+    heights = evaluate_fourier_surface(
+        ac_coeffs, xx, zz, L_x, L_z,
+        cfg.n_fourier_x, cfg.n_fourier_z, cfg.perturb_max
+    )
+    ac_budget = cfg.perturb_max / 2.0
+    l1_norm   = float(np.sum(np.abs(ac_coeffs)))
+    print(f"  Fourier surface stats:")
+    print(f"    n_fourier_x={cfg.n_fourier_x}, n_fourier_z={cfg.n_fourier_z}  "
+          f"({get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)} DVs)")
+    print(f"    AC L1 norm: {l1_norm:.3f} / {ac_budget:.3f} budget "
+          f"({'normalised' if l1_norm > ac_budget else 'within budget'})")
+    print(f"    Height range: [{heights.min():.2f}, {heights.max():.2f}] mm  "
+          f"(max allowed: {cfg.perturb_max:.2f} mm)")
+    print(f"    Mean: {heights.mean():.2f} mm  Std: {heights.std():.2f} mm")
 # =============================================================================
 # OBJECTIVE FUNCTION
 # =============================================================================
 def objective(dv: np.ndarray,
               cfg: FEAConfig,
-              run_name: str,
-              node_coords: np.ndarray,
-              struct_weight: float = 0.1,
-              n_freq: int = 6) -> tuple:
+              run_name: str) -> tuple:
     """
     Evaluate one design.
 
     Returns (obj_value, result_dict) where obj_value is the quantity
-    CMA-ES minimizes.
+    CMA-ES minimizes (absolute max -Y deflection in mm).
 
-    obj_value = deflection_mm * (1 + struct_weight * structural_penalty)
+    The Fourier parameterisation guarantees the surface stays in
+    [0, perturb_max] — no structural penalty term is needed here.
 
-    The structural penalty is in [0, 1]:
-      0 → perfectly low-frequency / regular pattern (ribs, corrugations)
-      1 → pure high-frequency noise or flat plate
-
-    A displacement sanity check is also applied: if the max total displacement
+    A displacement sanity check is applied: if the max total displacement
     across all nodes is more than 5× the Y deflection of interest, the result
-    is flagged as a numerical blowup (XZ stretching artifact) and penalised.
+    is flagged as a numerical blowup and penalised.
     """
     result = fea_run(dv, cfg, name=run_name)
     max_neg_y      = result.get("max_neg_y")
@@ -189,12 +123,6 @@ def objective(dv: np.ndarray,
             print(f"    [sanity] total disp {max_total_disp:.1f} mm vs "
                   f"Y disp {obj_value:.1f} mm (ratio {ratio:.1f}) → PENALTY")
             return PENALTY, result
-
-    # Structural penalty — reward low-frequency regularity
-    if struct_weight > 0.0 and node_coords is not None:
-        sp = structural_penalty(dv, node_coords, n_freq=n_freq)
-        obj_value = obj_value * (1.0 + struct_weight * sp)
-        print(f"    [struct] penalty={sp:.3f}  weighted_obj={obj_value:.4f} mm")
 
     return obj_value, result
 
@@ -348,6 +276,8 @@ def optimize(args):
         min_tet_quality   = args.min_tet_quality,
         thickness         = args.thickness,
         grid_spacing      = args.grid_spacing,
+        n_fourier_x       = args.n_fourier_x,
+        n_fourier_z       = args.n_fourier_z,
         load_z            = args.load_z,
         load_radius       = args.load_radius,
         load_force        = args.load_force,
@@ -358,13 +288,12 @@ def optimize(args):
         output_dir        = args.output_dir,
     )
 
-    n = get_dv_shape(args.grid_spacing)
-    lb = 0.0
-    ub = args.perturb_max
-
-    # Load DV spatial coordinates once — shape (n, 2), columns [x_mm, z_mm].
-    # These are fixed for the lifetime of the optimizer (grid doesn't change).
-    node_coords = get_dv_coords(args.grid_spacing)
+    n = get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)
+    # CMA-ES optimises raw AC coefficients in unconstrained space.
+    # The Fourier evaluator normalises them; bounds here guide initialisation.
+    ac_budget = cfg.perturb_max / 2.0
+    lb = -ac_budget
+    ub =  ac_budget
 
     print("=" * 60)
     print("CMA-ES Cover Geometry Optimizer")
@@ -374,8 +303,11 @@ def optimize(args):
     print(f"  Max evaluations:   {args.max_evals}")
     print(f"  Convergence tol:   {args.tol}")
     print(f"  Output dir:        {args.output_dir}")
-    print(f"  Grid spacing:      {cfg.grid_spacing} mm  ({n} DVs)")
+    print(f"  Fourier order:     {cfg.n_fourier_x} x {cfg.n_fourier_z}  ({n} DVs)")
+    print(f"  Grid spacing:      {cfg.grid_spacing} mm  (perturbation evaluation density)")
     print(f"  Surface mesh size: {cfg.surface_mesh_size} mm")
+    print(f"  Perturb max:       {cfg.perturb_max} mm  "
+          f"(DC={cfg.perturb_max/2:.1f} mm, AC budget={cfg.perturb_max/2:.1f} mm)")
     print(f"  Max tet volume:    {cfg.max_tet_vol}")
     print(f"  Load:              {cfg.load_force} N at Z={cfg.load_z}, r={cfg.load_radius} mm")
     print("=" * 60)
@@ -406,19 +338,21 @@ def optimize(args):
               f"best={best_obj:.4f} mm")
     else:
         if args.dv_file:
-            print(f"\nLoading initial DV from {args.dv_file}...")
+            print(f"\nLoading initial AC coefficients from {args.dv_file}...")
             x0 = np.loadtxt(args.dv_file, delimiter=",")
             if x0.shape != (n,):
                 raise ValueError(
                     f"DV file has {x0.shape} values, expected ({n},). "
-                    f"Use get_dv_shape() to check."
+                    f"Use get_dv_shape(n_fourier_x, n_fourier_z) to check."
                 )
         else:
-            print(f"\nGenerating random initial DV (seed={args.seed})...")
-            x0 = np.random.default_rng(args.seed).uniform(lb, ub, n)
+            print(f"\nGenerating random initial AC coefficients (seed={args.seed})...")
+            # Small coefficients near zero — DC offset handles the mean level
+            x0 = np.random.default_rng(args.seed).uniform(
+                -ac_budget * 0.1, ac_budget * 0.1, n)
 
-        # Initial step size: fraction of the DV range
-        sigma0 = (ub - lb) * args.sigma_frac
+        # Initial step size: fraction of the AC budget
+        sigma0 = ac_budget * args.sigma_frac
 
         # CMA-ES options
         # Use sep-CMA-ES (diagonal covariance) for large n
@@ -468,12 +402,7 @@ def optimize(args):
 
             t0 = time.time()
             try:
-                obj_val, result = objective(
-                    dv_clipped, cfg, run_name,
-                    node_coords=node_coords,
-                    struct_weight=args.struct_weight,
-                    n_freq=args.n_freq,
-                )
+                obj_val, result = objective(dv_clipped, cfg, run_name)
                 elapsed = time.time() - t0
                 print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
 
@@ -539,6 +468,8 @@ def optimize(args):
     print(f"  Best DV saved:     {args.output_dir}/best_dv.csv")
     print(f"  Best .frd:         {best_result.get('frd','?') if best_result else '?'}")
     print(f"  History:           {args.output_dir}/history.csv")
+    if best_dv is not None:
+        print_fourier_stats(best_dv, cfg)
     print("=" * 60)
 
     return best_obj, best_dv, best_result
@@ -569,15 +500,14 @@ def main():
                    help="Resume from checkpoint in --output-dir")
     p.add_argument("--dv-file",     default=None,
                    help="CSV file of initial DV values (default: random)")
-    p.add_argument("--struct-weight", type=float, default=0.1,
-                   help="Weight for structural regularity penalty [0=off, 0.1=default]. "
-                        "Penalises high-frequency noise; rewards rib/corrugation patterns. "
-                        "Value is a multiplier on the deflection objective: "
-                        "obj = deflection * (1 + struct_weight * penalty).")
-    p.add_argument("--n-freq",      type=int,   default=6,
-                   help="Number of Fourier frequency steps per axis for the structural "
-                        "penalty (default 6 → allows up to 5 full cycles across the part). "
-                        "Increase to allow finer features; decrease to force coarser patterns.")
+    p.add_argument("--n-fourier-x",   type=int,   default=cfg_default.n_fourier_x,
+                   help="Fourier frequency steps along X. "
+                        "Total DVs = n_fourier_x * n_fourier_z * 4. "
+                        "n=4 → up to 3 full cycles across part width.")
+    p.add_argument("--n-fourier-z",   type=int,   default=cfg_default.n_fourier_z,
+                   help="Fourier frequency steps along Z. "
+                        "Total DVs = n_fourier_x * n_fourier_z * 4. "
+                        "n=4 → up to 3 full cycles along part depth.")
 
     # FEA config
     p.add_argument("--ccx",               default=cfg_default.ccx,

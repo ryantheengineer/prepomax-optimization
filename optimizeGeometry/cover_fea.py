@@ -30,12 +30,16 @@ Public API
     #   "frd"       : str | None     absolute path to the .frd file
     # }
 
-DV vector
----------
-    Length = get_dv_shape() = n_ix * n_iz.
-    Values are perturbation heights in mm, in [0, perturb_max].
-    Flat layout: ix varies fastest.
-      dv[iz_idx * n_ix + ix_idx]  ↔  grid point (ix, iz)
+DV vector (Fourier parameterisation)
+-------------------------------------
+    Length = get_dv_shape() = n_fourier_x * n_fourier_z * 4  (AC Fourier coefficients).
+    CMA-ES optimises these raw coefficients in unconstrained space.
+    Before geometry evaluation they are projected to [0, perturb_max] via:
+      1. DC offset = perturb_max / 2  (fixed, not a DV)
+      2. AC budget = perturb_max / 2  (sum of |coeffs| is normalised to this)
+      3. height(x,z) = DC + Σ A_mn·cos(mπx/Lx)·cos(nπz/Lz) + ...
+    The perturbation grid (grid_spacing) is independent of the Fourier order —
+    the same function is evaluated more or less densely depending on grid_spacing.
 
 CLI
 ---
@@ -126,14 +130,24 @@ class FEAConfig:
 
     # ── DV grid ─────────────────────────────────────────────────────────────
     grid_spacing: float              = 25.0
-    """Spacing (mm) of the perturbation grid used to define the DV points.
-    Smaller → more DVs, finer shape control, slower convergence.
-    Must match the value used when get_dv_shape() / get_dv_coords() are called.
-    Default matches create_cover_blend.py GRID_SPACING = 25.0."""
+    """Spacing (mm) of the perturbation grid at which the Fourier surface is
+    evaluated to produce height values.  Controls physical mesh resolution of
+    the perturbation — independent of the Fourier order.
+    Smaller → denser grid, more faithful shape representation."""
+
+    # ── Fourier parameterisation ─────────────────────────────────────────────
+    n_fourier_x: int                 = 4
+    """Number of Fourier frequency steps along X (0..n_fourier_x-1).
+    DVs = n_fourier_x * n_fourier_z * 4 (cos/cos, cos/sin, sin/cos, sin/sin).
+    n_fourier_x=4, n_fourier_z=4 → 64 DVs (3 full cycles max in each axis)."""
+
+    n_fourier_z: int                 = 4
+    """Number of Fourier frequency steps along Z (0..n_fourier_z-1)."""
 
     perturb_max: float               = 50.8
-    """Upper bound for perturbation height values (mm).
-    DV values must be in [0, perturb_max]."""
+    """Maximum perturbation height (mm).
+    The Fourier surface is guaranteed to stay in [0, perturb_max] via
+    DC-offset + AC-budget normalisation.  Never truncated."""
 
     # ── Solver ──────────────────────────────────────────────────────────────
     ccx: Optional[str]               = "E:/github/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/Solver/ccx_dynamic.exe"
@@ -173,88 +187,161 @@ class FEAConfig:
 
 
 # =============================================================================
-# DV GRID
+# FOURIER PARAMETERISATION  +  DV GRID
 # =============================================================================
-def _dv_grid_dims(grid_spacing: float = None):
-    """Compute grid dimensions using the given spacing (mm).
-    Falls back to ccb.GRID_SPACING if not provided."""
-    gs = float(grid_spacing) if grid_spacing is not None else ccb.GRID_SPACING
+def _grid_extent(grid_spacing: float):
+    """
+    Return (ix_list, iz_list, x_coords, z_coords, L_x, L_z) for the
+    perturbation evaluation grid.
+
+    The grid covers the full cover surface from x=0 to BX_O and
+    z=Z_MIN to z=0, at the requested spacing.  The Fourier surface is
+    evaluated at every grid point to produce height values.
+
+    Parameters
+    ----------
+    grid_spacing : float — mm between adjacent grid points
+    """
+    gs     = float(grid_spacing)
     Z_MIN  = _ARC1[1] - _ARC1[2]
     BX_O   = _ARC3[0] + math.sqrt(_ARC3[2]**2 - _ARC3[1]**2)
     ix_max = int(math.ceil(BX_O  / gs)) + 1
     iz_min = int(math.floor(Z_MIN / gs)) - 1
     ix_list = list(range(0, ix_max + 1))
-    iz_list = list(range(iz_min, -1 + 1))   # iz_max = -1
-    return len(ix_list), len(iz_list), ix_list, iz_list, gs
+    iz_list = list(range(iz_min, 0))       # iz_max = -1
+    x_coords = np.array([ix * gs for ix in ix_list], dtype=np.float64)
+    z_coords = np.array([iz * gs for iz in iz_list], dtype=np.float64)
+    L_x = x_coords.max() - x_coords.min() + 1e-9
+    L_z = z_coords.max() - z_coords.min() + 1e-9
+    return ix_list, iz_list, x_coords, z_coords, L_x, L_z
 
 
-def get_dv_shape(grid_spacing: float = None) -> int:
+def get_dv_shape(n_fourier_x: int = 4, n_fourier_z: int = 4) -> int:
     """
-    Return the number of DV values required by the current grid.
+    Return the number of Fourier AC coefficients (= number of DVs).
+
+    Each (mx, mz) frequency pair contributes 4 coefficients:
+      cos/cos, cos/sin, sin/cos, sin/sin.
+    The DC term is fixed at perturb_max/2 and is NOT a DV.
 
     Parameters
     ----------
-    grid_spacing : float, optional
-        Spacing (mm) of the perturbation grid.  If None, uses
-        ccb.GRID_SPACING (the module-level default, 25.0 mm).
+    n_fourier_x : int — frequency steps along X (0..n_fourier_x-1)
+    n_fourier_z : int — frequency steps along Z (0..n_fourier_z-1)
 
-    Call this once from your optimizer to size the DV vector.
+    Returns
+    -------
+    int : n_fourier_x * n_fourier_z * 4
     """
-    n_ix, n_iz, _, _, _ = _dv_grid_dims(grid_spacing)
-    return n_ix * n_iz
+    return n_fourier_x * n_fourier_z * 4
 
 
-def get_dv_coords(grid_spacing: float = None) -> np.ndarray:
+def evaluate_fourier_surface(ac_coeffs: np.ndarray,
+                              x_coords:  np.ndarray,
+                              z_coords:  np.ndarray,
+                              L_x: float, L_z: float,
+                              n_fourier_x: int, n_fourier_z: int,
+                              perturb_max: float) -> np.ndarray:
     """
-    Return the real (x, z) spatial coordinates for each DV, in mm.
+    Evaluate the 2D Fourier surface at a 1-D array of (x, z) query points.
 
-    The returned array has shape (n, 2) where n == get_dv_shape().
-    Row i corresponds to dv[i], with columns [x_mm, z_mm].
+    The surface is:
+        h(x,z) = DC + Σ_mx Σ_mz [A·cos(mx·πx/Lx)·cos(mz·πz/Lz)
+                                  + B·cos(mx·πx/Lx)·sin(mz·πz/Lz)
+                                  + C·sin(mx·πx/Lx)·cos(mz·πz/Lz)
+                                  + D·sin(mx·πx/Lx)·sin(mz·πz/Lz)]
 
-    The grid is symmetric: ix >= 0 maps to x = ix * grid_spacing.
-    iz <= -1 maps to z = iz * grid_spacing (negative = into the well).
-    ix varies fastest (same layout as the flat DV vector).
+    where DC = perturb_max / 2  (fixed offset so the mean is mid-range)
+    and the AC coefficients are normalised so their L1 norm ≤ perturb_max/2,
+    guaranteeing h ∈ [0, perturb_max] everywhere without any clamping.
 
     Parameters
     ----------
-    grid_spacing : float, optional
-        Spacing (mm) of the perturbation grid.  If None, uses
-        ccb.GRID_SPACING (the module-level default, 25.0 mm).
+    ac_coeffs   : 1-D array of raw CMA-ES DVs, length = get_dv_shape(...)
+    x_coords    : 1-D array of x positions (mm) — query points
+    z_coords    : 1-D array of z positions (mm) — query points (same length)
+    L_x, L_z    : domain lengths in x and z (mm)
+    n_fourier_x : frequency steps along X
+    n_fourier_z : frequency steps along Z
+    perturb_max : maximum perturbation height (mm)
+
+    Returns
+    -------
+    heights : 1-D array, same length as x_coords, values in [0, perturb_max]
     """
-    n_ix, n_iz, ix_list, iz_list, gs = _dv_grid_dims(grid_spacing)
-    coords = np.empty((n_ix * n_iz, 2), dtype=np.float64)
+    ac_coeffs = np.asarray(ac_coeffs, dtype=np.float64).ravel()
+    expected  = n_fourier_x * n_fourier_z * 4
+    if len(ac_coeffs) != expected:
+        raise ValueError(
+            f"ac_coeffs length {len(ac_coeffs)} != {expected} "
+            f"({n_fourier_x} fx × {n_fourier_z} fz × 4). "
+            f"Use get_dv_shape() to size the DV vector."
+        )
+
+    # ── Normalise: project AC coefficients to L1 norm ≤ perturb_max/2 ─────
+    ac_budget = perturb_max / 2.0
+    l1_norm   = np.sum(np.abs(ac_coeffs))
+    if l1_norm > ac_budget:
+        ac_coeffs = ac_coeffs * (ac_budget / l1_norm)
+
+    # ── Evaluate Fourier series ─────────────────────────────────────────────
+    x_n = np.asarray(x_coords, dtype=np.float64)
+    z_n = np.asarray(z_coords, dtype=np.float64)
+    heights = np.full(len(x_n), perturb_max / 2.0)   # DC offset
+
     idx = 0
+    for mx in range(n_fourier_x):
+        cx = np.cos(mx * np.pi * x_n / L_x)
+        sx = np.sin(mx * np.pi * x_n / L_x)
+        for mz in range(n_fourier_z):
+            cz = np.cos(mz * np.pi * z_n / L_z)
+            sz = np.sin(mz * np.pi * z_n / L_z)
+            heights += ac_coeffs[idx]   * cx * cz   # cos/cos
+            heights += ac_coeffs[idx+1] * cx * sz   # cos/sin
+            heights += ac_coeffs[idx+2] * sx * cz   # sin/cos
+            heights += ac_coeffs[idx+3] * sx * sz   # sin/sin
+            idx += 4
+
+    return heights   # guaranteed in [0, perturb_max]
+
+
+def _fourier_to_grid(ac_coeffs: np.ndarray, cfg: "FEAConfig") -> dict:
+    """
+    Evaluate the Fourier surface on the perturbation grid and return the
+    {(ix, iz): height_mm} dict that ccb.apply_perturbations() expects.
+
+    The perturbation grid (cfg.grid_spacing) is evaluated independently
+    of the Fourier order — the same Fourier function produces different
+    physical grid densities depending on grid_spacing.
+
+    Parameters
+    ----------
+    ac_coeffs : 1-D DV array from CMA-ES, length = get_dv_shape(...)
+    cfg       : FEAConfig instance
+
+    Returns
+    -------
+    dict mapping (ix, iz) → height in mm, guaranteed in [0, perturb_max]
+    """
+    ix_list, iz_list, x_coords, z_coords, L_x, L_z = _grid_extent(cfg.grid_spacing)
+
+    # Build flat query arrays over the full 2-D grid (iz outer, ix inner)
+    xx = np.array([ix * cfg.grid_spacing for iz in iz_list
+                                         for ix in ix_list], dtype=np.float64)
+    zz = np.array([iz * cfg.grid_spacing for iz in iz_list
+                                         for ix in ix_list], dtype=np.float64)
+
+    heights = evaluate_fourier_surface(
+        ac_coeffs, xx, zz, L_x, L_z,
+        cfg.n_fourier_x, cfg.n_fourier_z, cfg.perturb_max
+    )
+
+    grid = {}
+    k = 0
     for iz in iz_list:
         for ix in ix_list:
-            coords[idx, 0] = ix * gs   # x mm
-            coords[idx, 1] = iz * gs   # z mm
-            idx += 1
-    return coords
-
-
-def _dv_array_to_grid(dv_array, perturb_max, grid_spacing: float = None):
-    """
-    Convert a flat DV array to the {(ix,iz): value} dict ccb expects.
-    Values are clipped to [0, perturb_max].
-
-    Note on surface_mesh_size: to avoid inner/outer surface intersections
-    without smoothing, ensure:
-        surface_mesh_size < thickness/2 * grid_spacing / perturb_max
-    e.g. at grid_spacing=50, thickness=3, perturb_max=10: SMS < 7.5mm
-    """
-    n_ix, n_iz, ix_list, iz_list, gs = _dv_grid_dims(grid_spacing)
-    expected = n_ix * n_iz
-    dv_array = np.asarray(dv_array, dtype=float).ravel()
-    if len(dv_array) != expected:
-        raise ValueError(
-            f"DV vector length {len(dv_array)} != {expected} "
-            f"({n_ix} ix × {n_iz} iz). Use get_dv_shape() to size it correctly."
-        )
-    dv_array = np.clip(dv_array, 0.0, perturb_max)
-    grid = {}
-    for iz_idx, iz in enumerate(iz_list):
-        for ix_idx, ix in enumerate(ix_list):
-            grid[(ix, iz)] = float(dv_array[iz_idx * n_ix + ix_idx])
+            grid[(ix, iz)] = float(heights[k])
+            k += 1
     return grid
 
 # =============================================================================
@@ -797,12 +884,12 @@ def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
         "max_neg_y"      float | None    most negative Y displacement (mm)
         "max_total_disp" float | None    max displacement magnitude across all nodes (mm)
         "location"       tuple | None    (x, y, z) of that node (mm)
-        "dv"             np.ndarray      DV vector used (length get_dv_shape())
+        "dv"             np.ndarray      AC Fourier coefficients used (length get_dv_shape(n_fourier_x, n_fourier_z))
         "inp"            str             absolute path to the .inp file
         "frd"            str | None      absolute path to the .frd file
     """
     dv_arr  = np.asarray(dv, dtype=float).ravel()
-    dv_grid = _dv_array_to_grid(dv_arr, cfg.perturb_max, cfg.grid_spacing)
+    dv_grid = _fourier_to_grid(dv_arr, cfg)
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     out = os.path.abspath(os.path.join(cfg.output_dir, f"{name}.inp"))
@@ -921,7 +1008,17 @@ def main():
                    help="CalculiX executable path")
     p.add_argument("--perturb",           type=float,
                    default=cfg_default.perturb_max,
-                   help="Max random perturbation mm (0=flat)")
+                   help="Max perturbation height mm (DC offset + AC budget)")
+    p.add_argument("--grid-spacing",      type=float,
+                   default=cfg_default.grid_spacing,
+                   help="Spacing (mm) of the perturbation evaluation grid. "
+                        "Independent of Fourier order — same function, different density.")
+    p.add_argument("--n-fourier-x",       type=int,
+                   default=cfg_default.n_fourier_x,
+                   help="Fourier frequency steps along X (DVs = nx*nz*4)")
+    p.add_argument("--n-fourier-z",       type=int,
+                   default=cfg_default.n_fourier_z,
+                   help="Fourier frequency steps along Z (DVs = nx*nz*4)")
     p.add_argument("--seed",              type=int, default=42)
 
     g = p.add_mutually_exclusive_group()
@@ -935,14 +1032,21 @@ def main():
 
     args = p.parse_args()
 
+    cfg_cli = FEAConfig(
+        surface_mesh_size = args.surface_mesh_size,
+        grid_spacing      = args.grid_spacing if hasattr(args, "grid_spacing") else 25.0,
+        n_fourier_x       = args.n_fourier_x  if hasattr(args, "n_fourier_x")  else 4,
+        n_fourier_z       = args.n_fourier_z  if hasattr(args, "n_fourier_z")  else 4,
+        perturb_max       = args.perturb,
+    )
     if args.print_dv_shape:
-        n_ix, n_iz, ix_list, iz_list = _dv_grid_dims()
-        n = n_ix * n_iz
-        print(f"DV grid: {n_ix} ix × {n_iz} iz = {n} values")
-        print(f"  ix: 0..{ix_list[-1]}  (x = ix × {ccb.GRID_SPACING} mm, symmetric)")
-        print(f"  iz: {iz_list[0]}..{iz_list[-1]}  (z = iz × {ccb.GRID_SPACING} mm)")
-        print(f"  Flat: ix varies fastest")
-        print(f"  get_dv_shape() → {n}")
+        n = get_dv_shape(cfg_cli.n_fourier_x, cfg_cli.n_fourier_z)
+        ix_list, iz_list, _, _, _, _ = _grid_extent(cfg_cli.grid_spacing)
+        n_grid = len(ix_list) * len(iz_list)
+        print(f"Fourier DVs:  {cfg_cli.n_fourier_x} fx × {cfg_cli.n_fourier_z} fz × 4 = {n}")
+        print(f"Grid points:  {len(ix_list)} ix × {len(iz_list)} iz = {n_grid}")
+        print(f"Grid spacing: {cfg_cli.grid_spacing} mm")
+        print(f"Perturb max:  {cfg_cli.perturb_max} mm  (DC={cfg_cli.perturb_max/2:.1f}, AC budget={cfg_cli.perturb_max/2:.1f})")
         return
 
     cfg = FEAConfig(
@@ -957,18 +1061,24 @@ def main():
         tet_timeout       = args.tet_timeout,
         ccx               = args.ccx,
         perturb_max       = args.perturb,
+        grid_spacing      = args.grid_spacing,
+        n_fourier_x       = args.n_fourier_x,
+        n_fourier_z       = args.n_fourier_z,
         output_dir        = args.output_dir,
     )
 
-    # Resolve DV
+    n_dv = get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)
+
+    # Resolve DV (AC Fourier coefficients)
     if args.dv_values is not None:
         dv = np.array(args.dv_values)
     elif args.dv_file is not None:
         raw = open(args.dv_file).read().replace(",", " ").split()
         dv  = np.array([float(v) for v in raw])
     else:
+        # Random initialisation: small coefficients centred on zero
         rng = np.random.default_rng(args.seed)
-        dv  = rng.uniform(0, args.perturb, get_dv_shape())
+        dv  = rng.uniform(-args.perturb * 0.1, args.perturb * 0.1, n_dv)
 
     result = run(dv, cfg, name=args.name)
 
