@@ -361,47 +361,68 @@ def optimize(args):
         print(f"\nGenerating {n_init} initial samples (Sobol, seed={args.seed})...")
         sobol   = torch.quasirandom.SobolEngine(n, scramble=True, seed=args.seed)
         X_unit  = sobol.draw(n_init).to(device=device, dtype=dtype)
-        X       = unnormalize(X_unit, bounds_t)   # shape (n_init, n)
-        Y       = torch.full((n_init, 1), float("nan"), dtype=dtype, device=device)
+        X_all   = unnormalize(X_unit, bounds_t)   # all n_init candidates
+
+        # X and Y only contain *successful* runs — failures are excluded from
+        # the GP entirely so they don't pollute the surrogate model.
+        X       = torch.empty((0, n),  dtype=dtype, device=device)
+        Y       = torch.empty((0, 1),  dtype=dtype, device=device)
 
         best_obj    = float("inf")
         best_dv     = None
         best_result = None
         total_evals = 0
+        n_failed    = 0
 
         print(f"\nRunning {n_init} initial FEA evaluations...")
         for i in range(n_init):
-            dv_np    = X[i].cpu().numpy()
+            dv_np    = X_all[i].cpu().numpy()
             run_name = f"init_{total_evals+1:05d}"
             print(f"  [{i+1:3d}/{n_init}] {run_name} ...", end=" ", flush=True)
             t0 = time.time()
+            failed = False
             try:
                 obj_val, result = objective(dv_np, cfg, run_name)
                 elapsed = time.time() - t0
-                print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
-                Y[i, 0] = obj_val
-                if obj_val < best_obj:
-                    best_obj    = obj_val
-                    best_dv     = dv_np.copy()
-                    best_result = result
-                    save_best(args.output_dir, best_dv, best_result, best_obj)
-                    print(f"    *** New best: {best_obj:.4f} mm ***")
+                if obj_val >= PENALTY:
+                    # objective() returned a penalty (sanity check failed etc.)
+                    print(f"PENALISED ({obj_val:.0f} mm)  ({elapsed:.0f}s) — excluded from GP")
+                    failed  = True
+                    obj_val = PENALTY
+                    result  = None
+                    n_failed += 1
+                else:
+                    print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
+                    # Add to GP training data only on success
+                    x_t = torch.tensor(dv_np, dtype=dtype, device=device).unsqueeze(0)
+                    y_t = torch.tensor([[obj_val]], dtype=dtype, device=device)
+                    X   = torch.cat([X, x_t])
+                    Y   = torch.cat([Y, y_t])
+                    if obj_val < best_obj:
+                        best_obj    = obj_val
+                        best_dv     = dv_np.copy()
+                        best_result = result
+                        save_best(args.output_dir, best_dv, best_result, best_obj)
+                        print(f"    *** New best: {best_obj:.4f} mm ***")
             except Exception as e:
-                print(f"FAILED: {e}")
-                Y[i, 0] = PENALTY
+                elapsed = time.time() - t0
+                print(f"FAILED: {e}  ({elapsed:.0f}s) — excluded from GP")
+                failed  = True
                 obj_val = PENALTY
                 result  = None
-            save_eval(args.output_dir, total_evals + 1, run_name, obj_val,
-                      failed=(obj_val >= PENALTY))
-            save_history(args.output_dir, total_evals + 1, obj_val, best_obj, run_name)
+                n_failed += 1
+            save_eval(args.output_dir, total_evals + 1, run_name, obj_val, failed=failed)
+            save_history(args.output_dir, total_evals + 1, obj_val,
+                         best_obj if best_obj < float("inf") else float("nan"), run_name)
             total_evals += 1
 
-        # Replace any NaN/penalty inits with the observed max so GP isn't confused
-        Y_clean = Y.clone()
-        bad = ~torch.isfinite(Y_clean) | (Y_clean >= PENALTY)
-        if bad.any():
-            Y_clean[bad] = Y_clean[~bad].max() if (~bad).any() else torch.tensor(PENALTY)
-        Y = Y_clean
+        print(f"  Init complete: {total_evals - n_failed} successful, "
+              f"{n_failed} failed/penalised (excluded from GP)")
+        if X.shape[0] == 0:
+            raise RuntimeError(
+                "All initial evaluations failed — cannot fit GP. "
+                "Check your geometry/mesh settings before continuing."
+            )
 
         save_bo_checkpoint(args.output_dir, X, Y, best_obj, best_dv, total_evals)
         plot_progress(args.output_dir)
@@ -464,36 +485,50 @@ def optimize(args):
         run_name = f"bo_{total_evals+1:05d}"
         print(f"  Evaluating {run_name} ...", end=" ", flush=True)
         t0 = time.time()
+        failed = False
         try:
             obj_val, result = objective(dv_np, cfg, run_name)
             elapsed = time.time() - t0
-            print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
-            if obj_val < best_obj:
-                best_obj    = obj_val
-                best_dv     = dv_np.copy()
-                best_result = result
-                save_best(args.output_dir, best_dv, best_result, best_obj)
-                print(f"    *** New best: {best_obj:.4f} mm ***")
+            if obj_val >= PENALTY:
+                print(f"PENALISED ({obj_val:.0f} mm)  ({elapsed:.0f}s) — excluded from GP")
+                failed  = True
+                obj_val = PENALTY
+                result  = None
+            else:
+                print(f"{obj_val:.4f} mm  ({elapsed:.0f}s)")
+                if obj_val < best_obj:
+                    best_obj    = obj_val
+                    best_dv     = dv_np.copy()
+                    best_result = result
+                    save_best(args.output_dir, best_dv, best_result, best_obj)
+                    print(f"    *** New best: {best_obj:.4f} mm ***")
         except Exception as e:
-            print(f"FAILED: {e}")
+            elapsed = time.time() - t0
+            print(f"FAILED: {e}  ({elapsed:.0f}s) — excluded from GP")
+            failed  = True
             obj_val = PENALTY
             result  = None
 
-        # ── Update observed data ──────────────────────────────────────────
-        new_y = torch.tensor([[obj_val if obj_val < PENALTY else best_obj]],
-                             dtype=dtype, device=device)
-        X = torch.cat([X, candidate.to(device)])
-        Y = torch.cat([Y, new_y])
+        # ── Update observed data (successful runs only) ───────────────────
+        # Failed/penalised runs are logged but NOT added to X or Y.
+        # The GP never sees them, so its surrogate is not polluted by
+        # fake high-deflection observations from invalid geometries.
+        if not failed:
+            new_x = candidate.to(device=device, dtype=dtype)
+            new_y = torch.tensor([[obj_val]], dtype=dtype, device=device)
+            X = torch.cat([X, new_x])
+            Y = torch.cat([Y, new_y])
 
         total_evals += 1
-        save_eval(args.output_dir, total_evals, run_name, obj_val,
-                  failed=(obj_val >= PENALTY))
+        save_eval(args.output_dir, total_evals, run_name, obj_val, failed=failed)
         save_history(args.output_dir, total_evals, obj_val, best_obj, run_name)
         save_bo_checkpoint(args.output_dir, X, Y, best_obj, best_dv, total_evals)
         plot_progress(args.output_dir)
 
+        n_obs = X.shape[0]
         elapsed_total = time.time() - t_start
         print(f"  Iteration done. Best: {best_obj:.4f} mm  "
+              f"GP observations: {n_obs}  "
               f"(elapsed: {elapsed_total/60:.1f} min)")
 
     # ── Final report ──────────────────────────────────────────────────────

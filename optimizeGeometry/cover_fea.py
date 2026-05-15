@@ -828,19 +828,26 @@ def _run_ccx(inp_path, ccx_cmd):
             if line[1:3] == "-4" and "DISP" in line:
                 in_disp = True
                 comp_index = 0
-                d1_offset = BASE + 0
-                d2_offset = BASE + 12
-                d3_offset = BASE + 24
+                # Reset offsets to defaults; will be updated by -5 records.
+                # Defaults assume standard CalculiX order: ALL, D1, D2, D3
+                # i.e. ALL at index 0, D1 at 1, D2 at 2, D3 at 3.
+                d1_offset = BASE + 1 * 12
+                d2_offset = BASE + 2 * 12
+                d3_offset = BASE + 3 * 12
                 continue
             if not in_disp: continue
             rec = line[1:3]
             if rec == "-5":
                 cn = line[4:12].strip()
-                if cn == "ALL": continue
+                # Always record the offset for named components using the
+                # current comp_index, then increment regardless of name.
+                # Previously "ALL" triggered a 'continue' that skipped the
+                # increment, causing all subsequent component offsets to be
+                # one slot too low — reading the wrong displacement component.
                 if cn in ("D1", "U1"): d1_offset = BASE + comp_index * 12
                 if cn in ("D2", "U2"): d2_offset = BASE + comp_index * 12
                 if cn in ("D3", "U3"): d3_offset = BASE + comp_index * 12
-                comp_index += 1
+                comp_index += 1   # always increment, even for "ALL"
             elif rec == "-1":
                 try:
                     u1 = float(line[d1_offset:d1_offset+12])
