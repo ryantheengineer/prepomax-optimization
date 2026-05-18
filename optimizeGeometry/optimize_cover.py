@@ -41,6 +41,7 @@ Checkpointing
       <output_dir>/best_dv.csv         — AC coefficients of the best design
       <output_dir>/best_result.json    — metadata of the best result so far
       <output_dir>/opt_progress.png    — progress plot (requires matplotlib)
+      <output_dir>/run_args.txt        — original and resume commands for this run
 
 SAASBO fitting time
 -------------------
@@ -289,8 +290,45 @@ def save_best(output_dir, dv, result, obj_value):
 # =============================================================================
 # MAIN OPTIMIZER  (SAASBO)
 # =============================================================================
+def save_run_args(args):
+    """
+    Write the full command used to start this run to <output_dir>/run_args.txt.
+    Includes a ready-to-use resume command.  Called at startup so the arguments
+    are always recorded alongside the checkpoint even if the run is interrupted.
+    """
+    path = os.path.join(args.output_dir, "run_args.txt")
+    # Build the argument string from the parsed namespace
+    arg_lines = ["python optimize_cover.py \\"]
+    for key, val in sorted(vars(args).items()):
+        if key == "resume":
+            continue   # omit --resume from the original command
+        if val is None:
+            continue
+        flag = "--" + key.replace("_", "-")
+        if isinstance(val, bool):
+            if val:
+                arg_lines.append(f"    {flag} \\")
+        else:
+            arg_lines.append(f"    {flag} {val} \\")
+    # Strip trailing backslash from last line
+    arg_lines[-1] = arg_lines[-1].rstrip(" \\")
+    original_cmd = "\n".join(arg_lines)
+
+    resume_lines = arg_lines[:-1] + [arg_lines[-1] + " \\", "    --resume"]
+    resume_cmd   = "\n".join(resume_lines)
+
+    with open(path, "w") as f:
+        f.write("# Original command\n")
+        f.write(original_cmd + "\n\n")
+        f.write("# Resume command\n")
+        f.write(resume_cmd + "\n")
+
+    print(f"  Run args saved to {path}")
+
+
 def optimize(args):
     os.makedirs(args.output_dir, exist_ok=True)
+    save_run_args(args)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.double
     print(f"  Using device: {device}")
@@ -341,6 +379,7 @@ def optimize(args):
     print(f"  Max evaluations:   {args.max_evals}")
     print(f"  Initial samples:   {args.n_init}")
     print(f"  MCMC warmup/samples: {args.mcmc_warmup}/{args.mcmc_samples}")
+    print(f"  Max GP observations: {args.max_gp_obs}")
     print(f"  Output dir:        {args.output_dir}")
     print(f"  Max tet volume:    {cfg.max_tet_vol}")
     print(f"  Load:              {cfg.load_force} N at Z={cfg.load_z}, "
@@ -437,15 +476,39 @@ def optimize(args):
               f"(best so far: {best_obj:.4f} mm) ──")
 
         # ── Fit surrogate ────────────────────────────────────────────────
+        # Subsample observations to cap GPU/CPU memory usage.
+        # Strategy: keep the best half by objective + the most recent half.
+        # This ensures the GP always sees the strongest signals found so far
+        # plus recent exploration, regardless of total run length.
+        n_obs = X.shape[0]
+        if n_obs > args.max_gp_obs:
+            half = args.max_gp_obs // 2
+            # Best half: lowest deflection values
+            best_idx    = torch.argsort(Y.squeeze())[:half]
+            # Recent half: most recent evaluations
+            recent_idx  = torch.arange(
+                max(0, n_obs - half), n_obs,
+                device=device
+            )
+            keep        = torch.unique(torch.cat([best_idx, recent_idx]))
+            X_fit       = X[keep]
+            Y_fit       = Y[keep]
+            print(f"  GP training on {keep.shape[0]}/{n_obs} observations "
+                  f"({half} best + {half} recent, capped at {args.max_gp_obs})")
+        else:
+            X_fit = X
+            Y_fit = Y
+            print(f"  GP training on {n_obs} observations")
+
         print(f"  Fitting SAAS GP surrogate "
               f"(warmup={args.mcmc_warmup}, samples={args.mcmc_samples})...")
         t_fit = time.time()
 
         # Normalise X to [0,1]^n for GP, standardise Y to zero mean/unit var
-        X_norm = normalize(X, bounds_t)
-        Y_mean = Y.mean()
-        Y_std  = Y.std().clamp(min=1e-6)
-        Y_norm = (Y - Y_mean) / Y_std
+        X_norm = normalize(X_fit, bounds_t)
+        Y_mean = Y_fit.mean()
+        Y_std  = Y_fit.std().clamp(min=1e-6)
+        Y_norm = (Y_fit - Y_mean) / Y_std
 
         model = SaasFullyBayesianSingleTaskGP(
             train_X = X_norm,
@@ -594,6 +657,12 @@ def main():
                    help="Raw samples for acquisition function initialisation.")
     p.add_argument("--verbose-mcmc",  action="store_true",
                    help="Show MCMC progress bar during GP fitting.")
+    p.add_argument("--max-gp-obs",    type=int,   default=300,
+                   help="Maximum observations fed to the GP at each iteration. "
+                        "Caps memory usage as the run accumulates data. "
+                        "Keeps the best N/2 designs by objective and the most "
+                        "recent N/2, so the GP always sees the best designs found "
+                        "plus fresh exploration data. Default: 300.")
 
     # ── Fourier parameterisation ──────────────────────────────────────────────
     p.add_argument("--n-fourier-x",   type=int,   default=cfg_default.n_fourier_x,
