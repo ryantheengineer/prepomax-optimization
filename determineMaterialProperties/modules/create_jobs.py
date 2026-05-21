@@ -18,6 +18,8 @@ import os
 import shutil
 import yaml
 
+SETUP_CONFIG = "setup_config.yaml"
+
 def create_jobs(poisson):
     # # PCA align the raw scan meshes
     # raw_scans_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans"
@@ -51,11 +53,23 @@ def create_jobs(poisson):
     # print("\nCreating test-specific mesh files based on real test data")
     # create_models(test_data_filepath, quad_meshes_folder, prepared_meshes_folder)
     
+    # Load and validate setup filepaths
+    try:
+        with open(SETUP_CONFIG, 'r') as f:
+            setup_config = yaml.safe_load(f)
+    except Exception as e:
+        raise Exception(f"Failed to parse setup config YAML: {e}")
     
-    test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
-    scanned_fixtures_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures"
-    scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
-    prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
+    
+    test_data_filepath = setup_config["test_data_filepath"]
+    scanned_fixtures_folder = setup_config["scanned_fixtures_folder"]
+    scanned_specimens_folder = setup_config["scanned_specimens_folder"]
+    prepared_meshes_folder = setup_config["prepared_meshes_folder"]
+    
+    # test_data_filepath = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/4 - Flexural Test Data/test_data.xlsx"
+    # scanned_fixtures_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Fixtures"
+    # scanned_specimens_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/1 - Raw Scans/Specimens"
+    # prepared_meshes_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/5 - Flexural Test Meshes"
     
     visualization=True
     create_models(test_data_filepath, scanned_fixtures_folder, scanned_specimens_folder, prepared_meshes_folder, visualization=visualization)
@@ -66,11 +80,15 @@ def create_jobs(poisson):
     
     # Create job folders with YAML config files and the test-specific meshes
     print("\nCreating job folders and necessary files")
-    jobs_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/7 - Jobs"
+    jobs_folder = setup_config["jobs_folder"]
+    # jobs_folder = "G:/Shared drives/RockWell Shared/Rockwell Redesign Project/Strength + Performance/Flexural Stiffness Characterization/7 - Jobs"
     df_test_data = pd.read_excel(test_data_filepath)
     os.makedirs(jobs_folder, exist_ok=True)
     
     for index, row in df_test_data.iterrows():
+        if row["Job Created"] == True:
+            continue
+        
         job_name = row["Job Name"]
         
         # Create a folder in jobs_folder
@@ -82,12 +100,14 @@ def create_jobs(poisson):
         test_mesh = row["Test Specific Mesh File"]
         print(f"Copying {os.path.basename(test_mesh)} into {job_folder}")
         destination_test_mesh = os.path.join(job_folder, os.path.basename(test_mesh))
+        destination_test_mesh = destination_test_mesh.replace("\\","/")
         shutil.copy2(test_mesh, destination_test_mesh)
         
         target_stiffness = row["Flexural Stiffness (N/mm)"]
         
         # Create unique results directory for each job
-        base_results_dir = 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/output'
+        base_results_dir = setup_config["base_results_dir"]
+        # base_results_dir = 'C:/Users/Ryan.Larson.ROCKWELLINC/github/prepomax-optimization/determineMaterialProperties/output'
         unique_results_dir = os.path.join(base_results_dir, job_name)
         unique_results_dir = unique_results_dir.replace(os.sep, "/")
         
@@ -95,15 +115,29 @@ def create_jobs(poisson):
         params = {'poisson': poisson,
                   'displacement': row["Displacement (mm)"],
                   'results_directory': unique_results_dir,  # Now unique per job
-                  'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
-                  'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacement_v2.pmx',
-                  'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/base_geometry.stl',
-                  'geo_target_file': f'C:/tmp/job/{os.path.basename(test_mesh)}',
+                  'ccx_executable': setup_config["ccx_executable"],
+                  'disp_pmx_file': setup_config["disp_pmx_file"],
+                  'geo_source_file': setup_config["geo_source_file"],
+                  'geo_target_file': f'{destination_test_mesh}',
                   'target_stiffness': target_stiffness,
                   'log_file': f'{job_name}.log',
                   'job_name': job_name,
-                  'opt_working_directory': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/modules',
+                  'opt_working_directory': setup_config["opt_working_directory"],
             }
+        
+        # # Create the YAML parameters
+        # params = {'poisson': poisson,
+        #           'displacement': row["Displacement (mm)"],
+        #           'results_directory': unique_results_dir,  # Now unique per job
+        #           'ccx_executable': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/PrePoMax v2.2.0/PrePoMax.com',
+        #           'disp_pmx_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/displacement_v2.pmx',
+        #           'geo_source_file': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/pmx_files/v2/base_geometry.stl',
+        #           'geo_target_file': f'C:/tmp/job/{os.path.basename(test_mesh)}',
+        #           'target_stiffness': target_stiffness,
+        #           'log_file': f'{job_name}.log',
+        #           'job_name': job_name,
+        #           'opt_working_directory': 'C:/Users/Administrator/prepomax-optimization/determineMaterialProperties/modules',
+        #     }
         
         # Create the YAML file
         yaml_filename = f"{job_name}.yaml"
@@ -111,6 +145,9 @@ def create_jobs(poisson):
         with open(yaml_filepath, 'w') as file:
             yaml.dump(params, file, default_flow_style=False)
             
+        df_test_data.loc[index, "Job Created"] = 1
+        
+    df_test_data.to_excel(test_data_filepath, index=False)
     print("\nALL PROCESSING COMPLETE")
         
 
