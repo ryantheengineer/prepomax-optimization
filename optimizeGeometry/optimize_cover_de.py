@@ -373,10 +373,11 @@ def de_crossover(parent, mutant, CR, n_dvs, rng):
 
 
 def evaluate_population(population, cfg, output_dir, total_evals,
-                         generation, best_obj):
+                         generation, best_obj, plot_every=0):
     """
     Evaluate all members of a population (or trial vectors).
     Returns array of fitness values and list of results.
+    plot_every: update progress plot every N evals (0 = only at generation end).
     """
     pop_size = len(population)
     fitnesses = np.full(pop_size, PENALTY)
@@ -405,6 +406,10 @@ def evaluate_population(population, cfg, output_dir, total_evals,
         results[i]   = result
         save_eval(output_dir, total_evals + 1, run_name, fitness, failed=failed)
         total_evals += 1
+
+        # Intra-generation progress plot
+        if plot_every > 0 and total_evals % plot_every == 0:
+            plot_progress(output_dir)
 
     return fitnesses, results, total_evals, failures
 
@@ -517,7 +522,8 @@ def optimize(args):
         # ── Evaluate initial population ───────────────────────────────────────
         print(f"\nEvaluating initial population ({pop_size} designs)...")
         fitness, results, total_evals, failures = evaluate_population(
-            population, cfg, args.output_dir, total_evals, generation, best_obj
+            population, cfg, args.output_dir, total_evals, generation, best_obj,
+            plot_every=args.plot_every
         )
 
         # Update best
@@ -594,6 +600,10 @@ def optimize(args):
             save_eval(args.output_dir, total_evals + 1, run_name,
                       trial_fitness, failed=failed)
             total_evals += 1
+
+            # Intra-generation progress plot
+            if args.plot_every > 0 and total_evals % args.plot_every == 0:
+                plot_progress(args.output_dir)
 
             # Selection: replace if trial is better (or parent was penalty)
             if trial_fitness < fitness[i]:
@@ -693,6 +703,10 @@ def main():
                    help="Maximum generations (alternative to --max-evals).")
     p.add_argument("--seed",          type=int,   default=_d("seed", 42),
                    help="Random seed for population initialisation.")
+    p.add_argument("--plot-every",    type=int,   default=_d("plot_every", 20),
+                   help="Update opt_progress.png every N individual evaluations "
+                        "in addition to the end-of-generation update. "
+                        "Set to 0 to only plot at generation boundaries.")
     p.add_argument("--resume",        action="store_true",
                    help="Resume from checkpoint in --output-dir.")
     p.add_argument("--dv-file",       default=None,
