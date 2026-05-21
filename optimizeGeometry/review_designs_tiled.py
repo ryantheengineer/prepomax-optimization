@@ -1,27 +1,25 @@
 """
-review_designs.py
-=================
+review_designs_tiled.py
+========================
 Visualise the top candidate designs from a completed (or in-progress) SAASBO
 optimization run.
 
-Reads the bo_checkpoint.pkl produced by optimize_cover.py and generates a
+Reads the bo_checkpoint.pkl produced by optimize_cover_tiled.py and generates a
 multi-page PDF (and individual PNGs) showing isometric surface plots of the
 best designs, ranked by deflection.
 
 Usage
 -----
     # Best 10 designs
-    python review_designs.py --output-dir opt_results --top-n 10
+    python review_designs_tiled.py --output-dir tiled_output1 --top-n 10
 
     # Best 5% of designs
-    python review_designs.py --output-dir opt_results --top-pct 5
+    python review_designs_tiled.py --output-dir tiled_output1 --top-pct 5
 
-    # Both filters applied (whichever gives more designs)
-    python review_designs.py --output-dir opt_results --top-n 10 --top-pct 5
-
-    # Override Fourier/grid params if they differ from defaults
-    python review_designs.py --output-dir opt_results --top-n 10 \\
-        --n-fourier-x 4 --n-fourier-z 4 --grid-spacing 25 --perturb-max 50.8
+    # Override tile params if needed
+    python review_designs_tiled.py --output-dir tiled_output1 --top-n 10 \\
+        --n-global-x 4 --n-global-z 4 --n-tile-x 4 --n-tile-z 4 \\
+        --tile-x 50 --tile-z 100
 
 Output
 ------
@@ -54,7 +52,7 @@ try:
 except ImportError:
     sys.exit("matplotlib is required: pip install matplotlib")
 
-from cover_fea import FEAConfig, evaluate_fourier_surface, _grid_extent, get_dv_shape
+from cover_fea_tiled import FEAConfig, evaluate_tiled_surface, get_dv_shape
 import math
 
 # =============================================================================
@@ -139,7 +137,7 @@ def cover_boundary_polygon():
 def load_checkpoint(output_dir):
     path = os.path.join(output_dir, "bo_checkpoint.pkl")
     if not os.path.exists(path):
-        sys.exit(f"No checkpoint found at {path}\nRun optimize_cover.py first.")
+        sys.exit(f"No checkpoint found at {path}\nRun optimize_cover_tiled.py first.")
     with open(path, "rb") as f:
         d = pickle.load(f)
     X = np.array(d["X"])   # (n_obs, n_dvs)
@@ -165,7 +163,7 @@ def load_run_names(output_dir):
 # =============================================================================
 # SURFACE EVALUATION
 # =============================================================================
-def compute_surface(ac_coeffs, cfg, vis_spacing=None):
+def compute_surface(dv, cfg, vis_spacing=None):
     """
     Return (X_grid, Z_grid, H_grid, inside_mask) for the FULL symmetric cover.
 
@@ -176,10 +174,9 @@ def compute_surface(ac_coeffs, cfg, vis_spacing=None):
                   Used to set face colours transparent rather than NaN, avoiding
                   the quad-dropout problem matplotlib has with NaN surfaces.
 
-    vis_spacing : grid spacing for visualisation (mm). If None, uses cfg.grid_spacing.
-                  Can be set finer than the optimisation grid for smoother plots.
+    vis_spacing : grid spacing for visualisation (mm). Defaults to tile_size/8.
     """
-    gs = vis_spacing if vis_spacing is not None else cfg.grid_spacing
+    gs = vis_spacing if vis_spacing is not None else min(cfg.tile_x, cfg.tile_z) / 8.0
 
     # Build a visualisation-only grid extent at the requested spacing
     import math as _math
@@ -190,18 +187,12 @@ def compute_surface(ac_coeffs, cfg, vis_spacing=None):
     x_coords = np.array([ix * gs for ix in range(0, ix_max + 1)])
     z_coords = np.array([iz * gs for iz in range(iz_min, 0)])
 
-    # Use the Fourier domain lengths from the optimisation grid (not vis grid)
-    _, _, _, _, L_x, L_z = _grid_extent(cfg.grid_spacing)
-
-    # Positive-x half
+    # Positive-x half — evaluate the two-level tiled surface
     X2d_pos, Z2d_pos = np.meshgrid(x_coords, z_coords)
     xx_pos = X2d_pos.ravel()
     zz     = Z2d_pos.ravel()
 
-    heights_pos = evaluate_fourier_surface(
-        ac_coeffs, xx_pos, zz, L_x, L_z,
-        cfg.n_fourier_x, cfg.n_fourier_z, cfg.perturb_max
-    )
+    heights_pos = evaluate_tiled_surface(dv, cfg, xx_pos, zz)
     H2d_pos = heights_pos.reshape(X2d_pos.shape)
 
     # Mirror: negative-x half is symmetric; skip x=0 column to avoid duplication
@@ -254,7 +245,7 @@ def plot_design(ax, X2d, Z2d, H2d, quad_inside, cfg, rank, deflection_mm, best_m
     """
     # Use H2d for colours — NaN points get the nearest valid colour via clip
     norm_h = np.clip(
-        np.where(np.isnan(H2d), 0.0, H2d) / cfg.perturb_max,
+        np.where(np.isnan(H2d), 0.0, H2d) / (cfg.global_max + cfg.tile_max),
         0.0, 1.0
     )  # (nz, nx)
 
@@ -282,13 +273,13 @@ def plot_design(ax, X2d, Z2d, H2d, quad_inside, cfg, rank, deflection_mm, best_m
     # True world-scale aspect ratio — no vertical exaggeration
     x_span = float(np.max(X2d) - np.min(X2d))
     z_span = float(abs(np.max(Z2d) - np.min(Z2d)))
-    h_span = float(cfg.perturb_max)
+    h_span = float((cfg.global_max + cfg.tile_max))
     ax.set_box_aspect([x_span, z_span, h_span])
 
     # Axis limits
     ax.set_xlim(float(np.min(X2d)), float(np.max(X2d)))
     ax.set_ylim(float(np.min(Z2d)), float(np.max(Z2d)))
-    ax.set_zlim(0.0, float(cfg.perturb_max))
+    ax.set_zlim(0.0, float((cfg.global_max + cfg.tile_max)))
 
     # Labels
     pct_str = f"  (+{pct_above:.1f}%)" if pct_above is not None else ""
@@ -304,7 +295,7 @@ def plot_design(ax, X2d, Z2d, H2d, quad_inside, cfg, rank, deflection_mm, best_m
     # Colourbar
     mappable = cm.ScalarMappable(
         cmap=cm.viridis,
-        norm=mcolors.Normalize(vmin=0, vmax=cfg.perturb_max)
+        norm=mcolors.Normalize(vmin=0, vmax=(cfg.global_max + cfg.tile_max))
     )
     mappable.set_array([])
     plt.colorbar(mappable, ax=ax, shrink=0.45, pad=0.08, label="Height (mm)")
@@ -323,10 +314,14 @@ def _load_run_args(output_dir):
     if not os.path.exists(path):
         return {}
     wanted = {
-        "--n-fourier-x": int,
-        "--n-fourier-z": int,
-        "--grid-spacing": float,
-        "--perturb-max":  float,
+        "--n-global-x": int,
+        "--n-global-z": int,
+        "--global-max": float,
+        "--n-tile-x":   int,
+        "--n-tile-z":   int,
+        "--tile-x":     float,
+        "--tile-z":     float,
+        "--tile-max":   float,
     }
     found = {}
     with open(path) as f:
@@ -377,24 +372,33 @@ def main():
                    help="Show designs within this %% of the best deflection "
                         "(e.g. 10 = within 10%% of best)")
 
-    # ── Fourier / grid — defaults loaded from run_args.txt if present ─────────
-    p.add_argument("--n-fourier-x", type=int,
-                   default=_run_args.get("n_fourier_x", cfg_default.n_fourier_x),
-                   help="Fourier X order. Loaded automatically from run_args.txt.")
-    p.add_argument("--n-fourier-z", type=int,
-                   default=_run_args.get("n_fourier_z", cfg_default.n_fourier_z),
-                   help="Fourier Z order. Loaded automatically from run_args.txt.")
-    p.add_argument("--grid-spacing", type=float,
-                   default=_run_args.get("grid_spacing", cfg_default.grid_spacing),
-                   help="Grid spacing (mm). Loaded automatically from run_args.txt. "
-                        "Must match the optimization run exactly.")
-    p.add_argument("--vis-spacing",  type=float, default=None,
-                   help="Grid spacing (mm) for visualisation rendering. "
-                        "Defaults to --grid-spacing. Set finer (e.g. 5) for "
-                        "smoother plots.")
-    p.add_argument("--perturb-max",  type=float,
-                   default=_run_args.get("perturb_max", cfg_default.perturb_max),
-                   help="Max perturbation (mm). Loaded automatically from run_args.txt.")
+    # ── Fourier / tile — defaults loaded from run_args.txt ─────────────────────
+    p.add_argument("--n-global-x", type=int,
+                   default=_run_args.get("n_global_x", cfg_default.n_global_x),
+                   help="Global Fourier X order — loaded from run_args.txt")
+    p.add_argument("--n-global-z", type=int,
+                   default=_run_args.get("n_global_z", cfg_default.n_global_z),
+                   help="Global Fourier Z order — loaded from run_args.txt")
+    p.add_argument("--global-max", type=float,
+                   default=_run_args.get("global_max", cfg_default.global_max),
+                   help="Max global layer height (mm) — loaded from run_args.txt")
+    p.add_argument("--n-tile-x",   type=int,
+                   default=_run_args.get("n_tile_x", cfg_default.n_tile_x),
+                   help="Tile Fourier X order — loaded from run_args.txt")
+    p.add_argument("--n-tile-z",   type=int,
+                   default=_run_args.get("n_tile_z", cfg_default.n_tile_z),
+                   help="Tile Fourier Z order — loaded from run_args.txt")
+    p.add_argument("--tile-x",     type=float,
+                   default=_run_args.get("tile_x", cfg_default.tile_x),
+                   help="Tile period X (mm) — loaded from run_args.txt")
+    p.add_argument("--tile-z",     type=float,
+                   default=_run_args.get("tile_z", cfg_default.tile_z),
+                   help="Tile period Z (mm) — loaded from run_args.txt")
+    p.add_argument("--tile-max",   type=float,
+                   default=_run_args.get("tile_max", cfg_default.tile_max),
+                   help="Max tile layer height (mm) — loaded from run_args.txt")
+    p.add_argument("--vis-spacing", type=float, default=None,
+                   help="Visualisation grid spacing (mm). Defaults to tile_size/8.")
 
     # ── Layout ───────────────────────────────────────────────────────────────
     p.add_argument("--cols",    type=int,   default=3,
@@ -439,21 +443,26 @@ def main():
 
     # ── FEAConfig for surface evaluation ──────────────────────────────────────
     cfg = FEAConfig(
-        n_fourier_x = args.n_fourier_x,
-        n_fourier_z = args.n_fourier_z,
-        grid_spacing = args.grid_spacing,
-        perturb_max  = args.perturb_max,
+        n_global_x = args.n_global_x,
+        n_global_z = args.n_global_z,
+        global_max = args.global_max,
+        n_tile_x   = args.n_tile_x,
+        n_tile_z   = args.n_tile_z,
+        tile_x     = args.tile_x,
+        tile_z     = args.tile_z,
+        tile_max   = args.tile_max,
     )
 
-    expected_n = get_dv_shape(cfg.n_fourier_x, cfg.n_fourier_z)
+    expected_n = get_dv_shape(cfg)
     if X.shape[1] != expected_n:
+        n_g = cfg.n_global_x * cfg.n_global_z * 4
+        n_t = cfg.n_tile_x   * cfg.n_tile_z   * 4
         sys.exit(
-            f"Checkpoint has {X.shape[1]} DVs per design but "
-            f"--n-fourier-x {args.n_fourier_x} --n-fourier-z {args.n_fourier_z} "
-            f"implies {expected_n} DVs. "
-            f"Pass the correct --n-fourier-x/z values for this run."
+            f"Checkpoint has {X.shape[1]} DVs but current settings imply {expected_n}:\n"
+            f"  global {cfg.n_global_x}x{cfg.n_global_z}x4={n_g} + "
+            f"tile {cfg.n_tile_x}x{cfg.n_tile_z}x4={n_t}\n"
+            f"Check --n-global-x/z and --n-tile-x/z match the run (see run_args.txt)."
         )
-
     # ── Write ranking CSV ──────────────────────────────────────────────────────
     ranking_path = os.path.join(review_dir, "ranking.csv")
     with open(ranking_path, "w", newline="") as f:
@@ -469,8 +478,9 @@ def main():
     # ── Pre-compute all surfaces ───────────────────────────────────────────────
     print("  Computing surfaces...")
     # Render at a finer grid than the optimisation grid for smoother plots
-    vis_spacing = args.vis_spacing if args.vis_spacing is not None else cfg.grid_spacing
-    print(f"  Visualisation grid spacing: {vis_spacing} mm")
+    vis_spacing = args.vis_spacing  # None → compute_surface uses tile_size/8
+    _eff = vis_spacing or min(cfg.tile_x, cfg.tile_z) / 8.0
+    print(f"  Visualisation grid spacing: {_eff:.1f} mm")
     surfaces = []
     for idx in selected:
         X2d, Z2d, H2d, quad_inside = compute_surface(X[idx], cfg, vis_spacing=vis_spacing)
@@ -563,216 +573,141 @@ def main():
 # COEFFICIENT SPECTRUM ANALYSIS
 # =============================================================================
 def analyse_spectrum(X, Y, selected, cfg, review_dir, run_names, dpi=120):
-    """
-    For each selected design, compute the power in each (mx, mz) Fourier mode
-    and produce two outputs:
-
-    1. spectrum_heatmap.png  — average power per (mx, mz) mode across all
-       selected designs, shown as a heatmap.  Bright cells are the frequencies
-       that matter most to performance.
-
-    2. spectrum_individual.png  — per-design mode power for the top-5 designs,
-       arranged as small multiples for comparison.
-
-    3. spectrum_report.txt  — text summary recommending a reduced Fourier order
-       for a focused follow-up run, based on the dominant frequencies found.
-    """
-    nfx = cfg.n_fourier_x
-    nfz = cfg.n_fourier_z
+    """Compute Fourier power for global and tile layers, produce heatmaps and report."""
+    n_g  = cfg.n_global_x * cfg.n_global_z * 4
+    n_t  = cfg.n_tile_x   * cfg.n_tile_z   * 4
+    ngx, ngz = cfg.n_global_x, cfg.n_global_z
+    ntx, ntz = cfg.n_tile_x,   cfg.n_tile_z
     n_sel = len(selected)
 
-    # Power matrix: shape (n_sel, nfx, nfz)
-    # Power of mode (mx, mz) = sum of squares of its 4 coefficients
-    power = np.zeros((n_sel, nfx, nfz), dtype=np.float64)
-    for rank_idx, obs_idx in enumerate(selected):
-        coeffs = X[obs_idx]   # flat array length nfx*nfz*4
+    def _layer_power(coeffs, nfx, nfz):
+        pwr = np.zeros((nfx, nfz))
         k = 0
         for mx in range(nfx):
             for mz in range(nfz):
-                power[rank_idx, mx, mz] = float(np.sum(coeffs[k:k+4]**2))
+                pwr[mx, mz] = float(np.sum(coeffs[k:k+4]**2))
                 k += 4
+        return pwr
 
-    # Normalise each design's power to sum=1 so designs with different
-    # overall coefficient magnitudes are comparable
-    for i in range(n_sel):
-        total = power[i].sum()
+    g_power = np.zeros((n_sel, ngx, ngz))
+    t_power = np.zeros((n_sel, ntx, ntz))
+    for rank_idx, obs_idx in enumerate(selected):
+        dv = X[obs_idx]
+        gp = _layer_power(dv[:n_g], ngx, ngz)
+        tp = _layer_power(dv[n_g:], ntx, ntz)
+        total = gp.sum() + tp.sum()
         if total > 0:
-            power[i] /= total
+            gp /= total; tp /= total
+        g_power[rank_idx] = gp
+        t_power[rank_idx] = tp
 
-    mean_power = power.mean(axis=0)   # (nfx, nfz)
+    mean_g = g_power.mean(axis=0)
+    mean_t = t_power.mean(axis=0)
 
-    # ── Heatmap of mean power ─────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(max(6, nfz * 0.6), max(5, nfx * 0.5)))
-    im = ax.imshow(mean_power, aspect="auto", origin="lower",
-                   cmap="hot", interpolation="nearest")
-    ax.set_xlabel("Z frequency index (mz)", fontsize=9)
-    ax.set_ylabel("X frequency index (mx)", fontsize=9)
-    ax.set_title(
-        f"Mean Fourier mode power across top-{n_sel} designs\n"
-        f"Bright = dominant frequency.  n_fourier_x={nfx}, n_fourier_z={nfz}",
-        fontsize=9
-    )
-    ax.set_xticks(range(nfz)); ax.set_xticklabels(range(nfz), fontsize=7)
-    ax.set_yticks(range(nfx)); ax.set_yticklabels(range(nfx), fontsize=7)
-    plt.colorbar(im, ax=ax, label="Normalised power")
+    # ── Heatmaps ──────────────────────────────────────────────────────────────
+    fig, (ax_g, ax_t) = plt.subplots(1, 2,
+                                      figsize=(12, max(5, max(ngx, ntx)*0.5)))
+    fig.suptitle(f"Mean Fourier power — top-{n_sel} designs", fontsize=10)
+    for ax, pwr, nfx, nfz, label in [
+        (ax_g, mean_g, ngx, ngz, f"Global ({ngx}x{ngz})"),
+        (ax_t, mean_t, ntx, ntz,
+         f"Tile ({ntx}x{ntz}) @ {cfg.tile_x}x{cfg.tile_z}mm"),
+    ]:
+        im = ax.imshow(pwr, aspect="auto", origin="lower",
+                       cmap="hot", interpolation="nearest")
+        ax.set_xlabel("Z freq (mz)", fontsize=8)
+        ax.set_ylabel("X freq (mx)", fontsize=8)
+        ax.set_title(label, fontsize=9)
+        ax.set_xticks(range(nfz)); ax.set_xticklabels(range(nfz), fontsize=7)
+        ax.set_yticks(range(nfx)); ax.set_yticklabels(range(nfx), fontsize=7)
+        plt.colorbar(im, ax=ax, label="Norm. power", shrink=0.8)
     plt.tight_layout()
     heatmap_path = os.path.join(review_dir, "spectrum_heatmap.png")
     fig.savefig(heatmap_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"  Spectrum heatmap written to {heatmap_path}")
 
-    # ── Per-design spectra for top 5 ─────────────────────────────────────────
-    top5 = selected[:min(5, n_sel)]
+    # ── Per-design top-5 ──────────────────────────────────────────────────────
+    top5  = selected[:min(5, n_sel)]
     ncols = len(top5)
-    fig, axes = plt.subplots(1, ncols, figsize=(ncols * 3.5, max(4, nfx * 0.4)))
+    fig, axes = plt.subplots(2, ncols,
+                              figsize=(ncols*3.5, max(7, max(ngx,ntx)*0.6)))
     if ncols == 1:
-        axes = [axes]
+        axes = axes.reshape(2, 1)
     for col, obs_idx in enumerate(top5):
-        rank = col + 1
-        ax = axes[col]
-        pwr = power[col]
-        im = ax.imshow(pwr, aspect="auto", origin="lower",
-                       cmap="hot", interpolation="nearest",
-                       vmin=0, vmax=mean_power.max())
-        ax.set_title(
-            f"#{rank}  {Y[obs_idx]:.1f} mm\n{run_names.get(obs_idx, '')}",
-            fontsize=7
-        )
-        ax.set_xlabel("mz", fontsize=7)
-        if col == 0:
-            ax.set_ylabel("mx", fontsize=7)
-        ax.set_xticks(range(nfz)); ax.set_xticklabels(range(nfz), fontsize=6)
-        ax.set_yticks(range(nfx)); ax.set_yticklabels(range(nfx), fontsize=6)
-    fig.suptitle(
-        f"Fourier mode power — individual top designs\n"
-        f"n_fourier_x={nfx}, n_fourier_z={nfz}",
-        fontsize=9
-    )
+        for row, (pwr_all, nfx, nfz, ref, layer) in enumerate([
+            (g_power, ngx, ngz, mean_g.max(), "Global"),
+            (t_power, ntx, ntz, mean_t.max(), "Tile"),
+        ]):
+            ax = axes[row, col]
+            im = ax.imshow(pwr_all[col], aspect="auto", origin="lower",
+                           cmap="hot", interpolation="nearest",
+                           vmin=0, vmax=max(ref, 1e-9))
+            if row == 0:
+                ax.set_title(f"#{col+1} {Y[obs_idx]:.1f}mm\n"
+                             f"{run_names.get(obs_idx,'')}", fontsize=7)
+            ax.set_ylabel(f"{layer} mx", fontsize=6)
+            ax.set_xlabel("mz", fontsize=6)
+            ax.set_xticks(range(nfz)); ax.set_xticklabels(range(nfz), fontsize=5)
+            ax.set_yticks(range(nfx)); ax.set_yticklabels(range(nfx), fontsize=5)
     plt.tight_layout()
     indiv_path = os.path.join(review_dir, "spectrum_individual.png")
     fig.savefig(indiv_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"  Individual spectra written to {indiv_path}")
 
-    # ── Text report with follow-up run recommendation ─────────────────────────
-    total_power = mean_power.sum()
-    threshold   = 0.90 * total_power
+    # ── Text report ───────────────────────────────────────────────────────────
+    def _dominant(pwr, nfx, nfz, thresh=0.90):
+        flat  = pwr.ravel(); total = flat.sum()
+        idx   = np.argsort(flat)[::-1]
+        cum   = 0.0; modes = []
+        for fi in idx:
+            mx, mz = divmod(int(fi), nfz)
+            cum += flat[fi]; modes.append((mx, mz, float(flat[fi])))
+            if cum >= thresh * total: break
+        return modes, max(m[0] for m in modes), max(m[1] for m in modes)
 
-    # Sort modes by power descending, accumulate until 90% threshold reached
-    flat_power   = mean_power.ravel()
-    flat_idx     = np.argsort(flat_power)[::-1]
-    cumulative   = 0.0
-    needed_modes = []
-    for fi in flat_idx:
-        mx, mz = divmod(fi, nfz)
-        cumulative += flat_power[fi]
-        needed_modes.append((mx, mz))
-        if cumulative >= threshold:
-            break
-
-    max_mx = max(m[0] for m in needed_modes)
-    max_mz = max(m[1] for m in needed_modes)
-
-    # Classify the spectrum pattern
-    # "High" means the dominant modes are in the upper half of the available range
-    mx_high = max_mx >= nfx * 0.6
-    mz_high = max_mz >= nfz * 0.6
-    current_dvs = nfx * nfz * 4
-
-    rec_nfx = max(3, max_mx + 1)
-    rec_nfz = max(3, max_mz + 1)
-    rec_dvs = rec_nfx * rec_nfz * 4
-    reduction = 100 * (1 - rec_dvs / current_dvs)
-
-    # Top 10 modes
-    top_modes = [(divmod(fi, nfz)[0], divmod(fi, nfz)[1], flat_power[fi])
-                 for fi in flat_idx[:10]]
+    g_modes, g_max_mx, g_max_mz = _dominant(mean_g, ngx, ngz)
+    t_modes, t_max_mx, t_max_mz = _dominant(mean_t, ntx, ntz)
+    g_high = g_max_mx >= ngx*0.6 or g_max_mz >= ngz*0.6
+    t_high = t_max_mx >= ntx*0.6 or t_max_mz >= ntz*0.6
+    rec_ngx = max(2, g_max_mx+1); rec_ngz = max(2, g_max_mz+1)
+    rec_ntx = max(2, t_max_mx+1); rec_ntz = max(2, t_max_mz+1)
+    cur_dvs = n_g + n_t
+    rec_dvs = (rec_ngx*rec_ngz + rec_ntx*rec_ntz)*4
 
     report_path = os.path.join(review_dir, "spectrum_report.txt")
     with open(report_path, "w") as f:
-        f.write("Fourier Coefficient Spectrum Analysis\n")
-        f.write("=" * 50 + "\n\n")
-        f.write(f"Run settings: n_fourier_x={nfx}, n_fourier_z={nfz} "
-                f"({current_dvs} DVs)\n")
-        f.write(f"Designs analysed: {n_sel}\n\n")
-
-        f.write("Top 10 dominant modes (mx, mz) by mean normalised power:\n")
-        for i, (mx, mz, pwr) in enumerate(top_modes, 1):
-            f.write(f"  {i:2d}. mx={mx}, mz={mz}  power={pwr:.4f}\n")
-
-        f.write(f"\n90% power threshold: mx<={max_mx} (of {nfx-1}), "
-                f"mz<={max_mz} (of {nfz-1})\n\n")
-
-        # ── Interpretation and recommendation ────────────────────────────────
-        f.write("Interpretation:\n")
-
-        if mx_high and mz_high:
-            f.write(
-                "  WARNING: Dominant modes are at HIGH frequencies in BOTH axes.\n"
-                "  This typically means one of two things:\n"
-                "  (a) Fine-grained features genuinely help structural performance,\n"
-                "      in which case you need MORE Fourier frequencies, not fewer.\n"
-                "  (b) The optimizer hasn't had enough evaluations to find the\n"
-                "      coarse-scale structure that dominates performance — the high-\n"
-                "      frequency results are essentially noise from the init phase.\n\n"
-                "  Recommended action: do NOT reduce the Fourier order yet.\n"
-                "  Instead, run more evaluations (resume the current run) or\n"
-                "  try a fresh run with the same order and more n-init evaluations.\n"
-                "  If high frequencies dominate after 2000+ evaluations, consider\n"
-                f"  increasing to --n-fourier-x {min(nfx+4,20)} "
-                f"--n-fourier-z {min(nfz+4,20)}.\n"
-            )
-            rec_nfx, rec_nfz = nfx, nfz   # keep current order
-
-        elif mx_high and not mz_high:
-            f.write(
-                f"  High X-frequency dominance (mx up to {max_mx} of {nfx-1}).\n"
-                f"  Fine X-variation matters; Z is mostly low-frequency.\n"
-                f"  Consider keeping n_fourier_x high but you may be able to\n"
-                f"  reduce n_fourier_z to {rec_nfz} with minimal loss.\n"
-            )
-
-        elif mz_high and not mx_high:
-            f.write(
-                f"  High Z-frequency dominance (mz up to {max_mz} of {nfz-1}).\n"
-                f"  Fine Z-variation matters; X is mostly low-frequency.\n"
-                f"  Consider keeping n_fourier_z high but reducing n_fourier_x\n"
-                f"  to {rec_nfx}.\n"
-            )
-
-        else:
-            f.write(
-                f"  LOW-frequency dominance — good signal.\n"
-                f"  The optimizer has found that coarse structure (slow variation\n"
-                f"  across the cover) drives performance. This is the ideal case:\n"
-                f"  reducing the Fourier order will concentrate the search budget\n"
-                f"  on what actually matters.\n"
-            )
-
-        if not (mx_high and mz_high):
-            f.write(f"\nRecommended follow-up run:\n")
-            f.write(f"  --n-fourier-x {rec_nfx} --n-fourier-z {rec_nfz}\n")
-            f.write(f"  ({rec_dvs} DVs vs {current_dvs} current")
-            if reduction > 0:
-                f.write(f" — {reduction:.0f}% reduction")
-            f.write(f")\n\n")
-            f.write(f"Suggested command:\n")
-            f.write(f"  python optimize_cover.py \\\n")
-            f.write(f"      --n-fourier-x {rec_nfx} --n-fourier-z {rec_nfz} \\\n")
+        f.write("Tiled Fourier Spectrum Analysis\n" + "="*50 + "\n\n")
+        f.write(f"Global: {ngx}x{ngz}x4={n_g} DVs  Tile: {ntx}x{ntz}x4={n_t} DVs\n")
+        f.write(f"Tile size: {cfg.tile_x}x{cfg.tile_z}mm  Designs: {n_sel}\n\n")
+        f.write("Global — top dominant modes:\n")
+        for i,(mx,mz,pw) in enumerate(g_modes[:10],1):
+            f.write(f"  {i:2d}. mx={mx} mz={mz}  pwr={pw:.4f}\n")
+        f.write(f"  90%: mx<={g_max_mx}/{ngx-1}, mz<={g_max_mz}/{ngz-1}\n\n")
+        f.write("Tile — top dominant modes:\n")
+        for i,(mx,mz,pw) in enumerate(t_modes[:10],1):
+            f.write(f"  {i:2d}. mx={mx} mz={mz}  pwr={pw:.4f}\n")
+        f.write(f"  90%: mx<={t_max_mx}/{ntx-1}, mz<={t_max_mz}/{ntz-1}\n\n")
+        f.write("Recommendations:\n")
+        f.write(f"  Global: {'high-freq — run more evals' if g_high else f'--n-global-x {rec_ngx} --n-global-z {rec_ngz}'}\n")
+        f.write(f"  Tile:   {'high-freq — may need finer tile' if t_high else f'--n-tile-x {rec_ntx} --n-tile-z {rec_ntz}'}\n")
+        if not g_high and not t_high:
+            red = 100*(1-rec_dvs/cur_dvs)
+            f.write(f"\nFollow-up ({rec_dvs} DVs, {red:.0f}% fewer):\n")
+            f.write(f"  python optimize_cover_tiled.py \\\n")
+            f.write(f"      --n-global-x {rec_ngx} --n-global-z {rec_ngz} \\\n")
+            f.write(f"      --n-tile-x {rec_ntx} --n-tile-z {rec_ntz} \\\n")
             f.write(f"      [... other args ...]\n")
 
     print(f"  Spectrum report written to {report_path}")
-    print()
-    if mx_high and mz_high:
-        print(f"  ⚠  High-frequency dominance in both axes — see spectrum_report.txt")
-        print(f"     Recommendation: continue current run or increase Fourier order")
+    if g_high or t_high:
+        print("  ⚠  High-frequency dominance — see spectrum_report.txt")
     else:
-        print(f"  Recommendation: --n-fourier-x {rec_nfx} --n-fourier-z {rec_nfz} "
-              f"({rec_dvs} DVs)")
-        if reduction > 0:
-            print(f"  ({reduction:.0f}% fewer DVs, captures 90% of dominant power)")
+        print(f"  Recommendation: --n-global-x {rec_ngx} --n-global-z {rec_ngz} "
+              f"--n-tile-x {rec_ntx} --n-tile-z {rec_ntz}")
+    return rec_ngx, rec_ngz, rec_ntx, rec_ntz
 
-    return rec_nfx, rec_nfz
 
 
 if __name__ == "__main__":
