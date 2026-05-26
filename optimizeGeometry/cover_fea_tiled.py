@@ -179,6 +179,11 @@ class FEAConfig:
     """Maximum height contribution from the tile layer (mm).
     The tile Fourier surface is clipped to [0, tile_max]."""
 
+    fillet_radius: float             = 0.1
+    """Sewing tolerance (mm) for OCC solid construction. 0.1mm approximates
+    sharp corners while keeping OCC numerically stable. Increase to 0.5mm
+    if geometry failures persist on steep height gradients."""
+
     # Combined height range: [0, global_max + tile_max]
     # This replaces the single perturb_max from cover_fea.py.
     @property
@@ -495,6 +500,11 @@ class FEAConfig:
     """Maximum height contribution from the tile layer (mm).
     The tile Fourier surface is clipped to [0, tile_max]."""
 
+    fillet_radius: float             = 0.1
+    """Sewing tolerance (mm) for OCC solid construction. 0.1mm approximates
+    sharp corners while keeping OCC numerically stable. Increase to 0.5mm
+    if geometry failures persist on steep height gradients."""
+
     # Combined height range: [0, global_max + tile_max]
     # This replaces the single perturb_max from cover_fea.py.
     @property
@@ -581,6 +591,121 @@ def _dv_array_to_grid(dv_array, perturb_max):
 # =============================================================================
 # GEOMETRY
 # =============================================================================
+
+def _build_thick_solid_occ(inner_verts, inner_tris, outer_verts, rim_tris,
+                            fillet_radius=0.1):
+    """
+    Build a closed triangulated solid using OCC's BRepBuilderAPI_Sewing.
+
+    OCC's sewing algorithm correctly handles sharp corners between adjacent
+    faces by finding shared edges and merging them within the sewing tolerance
+    (fillet_radius).  This replaces the manual node-offset approach which
+    produces geometrically invalid overlapping surfaces at sharp height
+    transitions.
+
+    fillet_radius : mm — sewing tolerance.  0.1mm approximates sharp corners
+                   while keeping OCC numerically stable.  Increase to 0.5mm
+                   if failures persist on very steep height gradients.
+
+    Returns (verts, faces) for TetGen, or (None, None) on failure.
+    Falls back silently so _build_solid_surface can use the manual approach.
+    """
+    try:
+        from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakePolygon,
+                                         BRepBuilderAPI_MakeFace,
+                                         BRepBuilderAPI_Sewing,
+                                         BRepBuilderAPI_MakeSolid)
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.BRep import BRep_Tool
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopAbs import TopAbs_FACE, TopAbs_SHELL
+        from OCP.TopoDS import TopoDS
+        from OCP.gp import gp_Pnt
+    except ImportError:
+        return None, None
+
+    sewing = BRepBuilderAPI_Sewing(max(float(fillet_radius), 0.01))
+
+    def _add_tri(verts_arr, a, b, c):
+        try:
+            p1 = gp_Pnt(float(verts_arr[a][0]),
+                        float(verts_arr[a][1]),
+                        float(verts_arr[a][2]))
+            p2 = gp_Pnt(float(verts_arr[b][0]),
+                        float(verts_arr[b][1]),
+                        float(verts_arr[b][2]))
+            p3 = gp_Pnt(float(verts_arr[c][0]),
+                        float(verts_arr[c][1]),
+                        float(verts_arr[c][2]))
+            if (p1.IsEqual(p2, 1e-6) or p2.IsEqual(p3, 1e-6) or
+                    p1.IsEqual(p3, 1e-6)):
+                return
+            poly = BRepBuilderAPI_MakePolygon(p1, p2, p3, True)
+            if not poly.IsDone():
+                return
+            face = BRepBuilderAPI_MakeFace(poly.Wire(), True)
+            if face.IsDone():
+                sewing.Add(face.Face())
+        except Exception:
+            pass
+
+    import numpy as np
+    N     = len(inner_verts)
+    all_v = np.vstack([inner_verts, outer_verts])
+
+    for a, b, c in inner_tris:
+        _add_tri(inner_verts, a, b, c)       # inner face
+    for a, b, c in inner_tris:
+        _add_tri(outer_verts, c, b, a)       # outer face (reversed winding)
+    for tri in rim_tris:
+        _add_tri(all_v, tri[0], tri[1], tri[2])   # rim
+
+    sewing.Perform()
+    sewn = sewing.SewedShape()
+    if sewn.IsNull():
+        return None, None
+
+    solid_builder = BRepBuilderAPI_MakeSolid()
+    exp = TopExp_Explorer(sewn, TopAbs_SHELL)
+    n_shells = 0
+    while exp.More():
+        solid_builder.Add(exp.Current())
+        n_shells += 1
+        exp.Next()
+
+    if n_shells == 0 or not solid_builder.IsDone():
+        return None, None
+
+    solid = solid_builder.Solid()
+    BRepMesh_IncrementalMesh(solid, 1.0, False, 0.5)
+
+    verts_out = []
+    faces_out = []
+    offset    = 0
+    exp2 = TopExp_Explorer(solid, TopAbs_FACE)
+    while exp2.More():
+        face = TopoDS.Face_s(exp2.Current())
+        loc  = face.Location()
+        tri  = BRep_Tool.Triangulation_s(face, loc)
+        if tri is not None:
+            for i in range(1, tri.NbNodes() + 1):
+                n = tri.Node(i)
+                verts_out.append([n.X(), n.Y(), n.Z()])
+            for i in range(1, tri.NbTriangles() + 1):
+                t = tri.Triangle(i)
+                a, b, c = t.Get()
+                faces_out.append([a - 1 + offset,
+                                   b - 1 + offset,
+                                   c - 1 + offset])
+            offset += tri.NbNodes()
+        exp2.Next()
+
+    if not verts_out:
+        return None, None
+
+    return (np.array(verts_out, dtype=np.float64),
+            np.array(faces_out, dtype=np.int32))
+
 def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     """
     Build the closed solid surface using the two-level tiled Fourier
@@ -697,11 +822,31 @@ def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     for a, b in directed.values():
         rim += [[a,b,b+N],[a,b+N,a+N]]
 
+    inner_arr = np.array(inner_v, dtype=np.float64)
+    outer_arr = np.array(outer_v, dtype=np.float64)
+    tris0_arr = np.array(tris0,  dtype=np.int32)
+    rim_arr   = np.array(rim,    dtype=np.int32)
+
+    # ── Try OCC sewing first (handles sharp corners correctly) ────────────────
+    try:
+        occ_verts, occ_faces = _build_thick_solid_occ(
+            inner_arr, tris0_arr, outer_arr, rim_arr,
+            fillet_radius=cfg.fillet_radius,
+        )
+        if occ_verts is not None and len(occ_verts) > 0:
+            print(f"  OCC solid: {len(occ_verts)} verts, {len(occ_faces)} faces")
+            return occ_verts, occ_faces
+        else:
+            print("  OCC solid returned empty — falling back to manual offset")
+    except Exception as e:
+        print(f"  OCC solid error ({e}) — falling back to manual offset")
+
+    # ── Manual offset fallback ────────────────────────────────────────────────
     all_verts = np.array(inner_v + outer_v, dtype=np.float64)
     all_faces = np.vstack([
         np.array([[f[0],f[1],f[2]]       for f in tris0], dtype=np.int32),
         np.array([[f[2]+N,f[1]+N,f[0]+N] for f in tris0], dtype=np.int32),
-        np.array(rim, dtype=np.int32),
+        rim_arr,
     ])
     assert all_faces.max() < len(all_verts)
     assert all_faces.min() >= 0
@@ -1359,6 +1504,11 @@ def main():
                    help="Tile height (mm) — Z period of repeating pattern")
     p.add_argument("--tile-max",    type=float, default=cfg_default.tile_max,
                    help="Max height from tile layer (mm)")
+    p.add_argument("--fillet-radius", type=float,
+                   default=cfg_default.fillet_radius,
+                   help="Fillet radius (mm) for OCC solid corner handling. "
+                        "0.1mm approximates sharp corners. Increase to 0.5mm "
+                        "if geometry failures persist.")
     # ── DV initialisation ─────────────────────────────────────────────────────
     p.add_argument("--seed",        type=int, default=42,
                    help="Random seed for DV initialisation")
@@ -1395,6 +1545,7 @@ def main():
         tile_x            = args.tile_x,
         tile_z            = args.tile_z,
         tile_max          = args.tile_max,
+        fillet_radius     = args.fillet_radius,
         output_dir        = args.output_dir,
     )
 
