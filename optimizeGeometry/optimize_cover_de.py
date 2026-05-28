@@ -179,14 +179,23 @@ def save_history(output_dir, generation, total_evals, best_obj,
                 f"{gen_best:.6f},{gen_mean:.6f},{gen_failures}\n")
 
 
-def save_eval(output_dir, eval_num, run_name, obj_val, failed=False):
+def save_eval(output_dir, eval_num, run_name, obj_val, failed=False, dv=None):
+    """
+    Log one FEA evaluation to evals.csv.
+    If dv is provided, the coefficient values are appended as additional columns
+    (dv_0, dv_1, ...) so failed evaluations can later be analysed to identify
+    which regions of coefficient space produce geometry or FEA failures.
+    """
     path = os.path.join(output_dir, "evals.csv")
     write_header = not os.path.exists(path)
     with open(path, "a") as f:
         if write_header:
-            f.write("eval_num,run_name,deflection_mm,failed\n")
+            n_dv = len(dv) if dv is not None else 0
+            dv_header = "," + ",".join(f"dv_{i}" for i in range(n_dv)) if n_dv else ""
+            f.write(f"eval_num,run_name,deflection_mm,failed{dv_header}\n")
         val_str = "failed" if failed else f"{obj_val:.6f}"
-        f.write(f"{eval_num},{run_name},{val_str},{int(failed)}\n")
+        dv_str  = ("," + ",".join(f"{v:.6f}" for v in dv)) if dv is not None else ""
+        f.write(f"{eval_num},{run_name},{val_str},{int(failed)}{dv_str}\n")
 
 
 def save_best(output_dir, dv, result, obj_value):
@@ -301,11 +310,14 @@ def _load_run_args(output_dir):
     if not os.path.exists(path):
         return {}
     int_args   = {"n_global_x", "n_global_z", "n_tile_x", "n_tile_z",
-                  "popsize", "max_evals", "max_gen", "seed", "tet_timeout"}
+                  "popsize", "max_evals", "max_gen", "seed", "tet_timeout",
+                  "plot_every"}
     float_args = {"global_max", "tile_max", "tile_x", "tile_z",
                   "surface_mesh_size", "max_tet_vol", "min_tet_quality",
                   "thickness", "load_z", "load_radius", "load_force",
-                  "mutation_lo", "mutation_hi", "recombination"}
+                  "mutation_lo", "mutation_hi", "recombination",
+                  "fillet_radius", "smooth_sigma"}
+    bool_args  = {"cleanup_fea_files"}
     found = {}
     with open(path) as f:
         for line in f:
@@ -314,7 +326,9 @@ def _load_run_args(output_dir):
                 continue
             parts = line.split()
             flag  = parts[0].lstrip("-").replace("-", "_")
-            if len(parts) >= 2:
+            if flag in bool_args:
+                found[flag] = True
+            elif len(parts) >= 2:
                 val = parts[1]
                 try:
                     if flag in int_args:
@@ -404,7 +418,8 @@ def evaluate_population(population, cfg, output_dir, total_evals,
 
         fitnesses[i] = fitness
         results[i]   = result
-        save_eval(output_dir, total_evals + 1, run_name, fitness, failed=failed)
+        save_eval(output_dir, total_evals + 1, run_name, fitness,
+                  failed=failed, dv=dv)
         total_evals += 1
 
         # Intra-generation progress plot
@@ -434,6 +449,9 @@ def optimize(args):
         tile_x            = args.tile_x,
         tile_z            = args.tile_z,
         tile_max          = args.tile_max,
+        smooth_sigma      = args.smooth_sigma,
+        fillet_radius     = args.fillet_radius,
+        cleanup_fea_files = args.cleanup_fea_files,
         load_z            = args.load_z,
         load_radius       = args.load_radius,
         load_force        = args.load_force,
@@ -598,7 +616,7 @@ def optimize(args):
                 print(f"{trial_fitness:.4f} mm  {arrow}  ({elapsed:.0f}s)")
 
             save_eval(args.output_dir, total_evals + 1, run_name,
-                      trial_fitness, failed=failed)
+                      trial_fitness, failed=failed, dv=trial)
             total_evals += 1
 
             # Intra-generation progress plot
@@ -736,6 +754,18 @@ def main():
     p.add_argument("--tile-max",    type=float,
                    default=_d("tile_max", cfg_default.tile_max),
                    help="Max height from tile layer (mm).")
+    p.add_argument("--smooth-sigma", type=float,
+                   default=_d("smooth_sigma", cfg_default.smooth_sigma),
+                   help="Gaussian smoothing sigma (grid spacings) applied to "
+                        "height field before geometry. 0=none, 0.5-1.5 reduces "
+                        "mesh intersection failures.")
+    p.add_argument("--fillet-radius", type=float,
+                   default=_d("fillet_radius", cfg_default.fillet_radius),
+                   help="OCC sewing tolerance (mm). 0.1mm default.")
+    p.add_argument("--cleanup-fea-files", action="store_true",
+                   default=_d("cleanup_fea_files", False),
+                   help="Delete .inp, .frd, .sta, .dat, .cvg, .12d after each "
+                        "FEA evaluation to save disk space.")
 
     # ── FEA / mesh ────────────────────────────────────────────────────────────
     p.add_argument("--ccx",               default=_d("ccx", cfg_default.ccx))

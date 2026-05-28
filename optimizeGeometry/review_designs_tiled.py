@@ -4,7 +4,7 @@ review_designs_tiled.py
 Visualise the top candidate designs from a completed (or in-progress) SAASBO
 optimization run.
 
-Reads the bo_checkpoint.pkl produced by optimize_cover_tiled.py and generates a
+Reads bo_checkpoint.pkl (SAASBO) or de_checkpoint.pkl (DE) and generates a
 multi-page PDF (and individual PNGs) showing isometric surface plots of the
 best designs, ranked by deflection.
 
@@ -135,14 +135,70 @@ def cover_boundary_polygon():
 
 
 def load_checkpoint(output_dir):
-    path = os.path.join(output_dir, "bo_checkpoint.pkl")
-    if not os.path.exists(path):
-        sys.exit(f"No checkpoint found at {path}\nRun optimize_cover_tiled.py first.")
-    with open(path, "rb") as f:
-        d = pickle.load(f)
-    X = np.array(d["X"])   # (n_obs, n_dvs)
-    Y = np.array(d["Y"])   # (n_obs, 1)
-    return X, Y.ravel(), d.get("best_obj"), d.get("total_evals", len(X))
+    """
+    Load checkpoint from either a SAASBO run (bo_checkpoint.pkl, keys X/Y)
+    or a DE run (de_checkpoint.pkl, keys population/fitness).
+    Returns (X, Y, best_obj, total_evals) in a consistent format.
+    """
+    bo_path = os.path.join(output_dir, "bo_checkpoint.pkl")
+    de_path = os.path.join(output_dir, "de_checkpoint.pkl")
+
+    if os.path.exists(bo_path):
+        with open(bo_path, "rb") as f:
+            d = pickle.load(f)
+        X = np.array(d["X"])
+        Y = np.array(d["Y"]).ravel()
+        return X, Y, d.get("best_obj"), d.get("total_evals", len(X))
+
+    elif os.path.exists(de_path):
+        with open(de_path, "rb") as f:
+            d = pickle.load(f)
+        # DE checkpoint stores the current population and fitness values.
+        # Also read evals.csv to get ALL evaluated designs (not just survivors)
+        # since the population only contains the current generation's best.
+        evals_path = os.path.join(output_dir, "evals.csv")
+        if os.path.exists(evals_path):
+            # Read all successful evaluations from evals.csv including DV values
+            rows_X, rows_Y = [], []
+            with open(evals_path) as f:
+                reader = csv.DictReader(f)
+                dv_cols = [k for k in reader.fieldnames if k.startswith("dv_")]
+                if dv_cols:
+                    for row in reader:
+                        if row.get("failed", "1") == "0":
+                            try:
+                                y = float(row["deflection_mm"])
+                                x = [float(row[c]) for c in dv_cols]
+                                rows_X.append(x)
+                                rows_Y.append(y)
+                            except (ValueError, KeyError):
+                                pass
+            if rows_X:
+                X = np.array(rows_X)
+                Y = np.array(rows_Y)
+                print(f"  Loaded {len(X)} successful evaluations from evals.csv")
+                return X, Y, d.get("best_obj"), d.get("total_evals", len(X))
+
+        # Fall back to population only if evals.csv has no DV columns
+        # (older runs before DV logging was added)
+        population = np.array(d["population"])
+        fitness    = np.array(d["fitness"]).ravel()
+        # Filter out penalty values
+        valid = fitness < 9000.0
+        if not valid.any():
+            sys.exit("DE checkpoint has no valid (non-penalty) designs.")
+        X = population[valid]
+        Y = fitness[valid]
+        print(f"  Loaded {len(X)} valid designs from DE population "
+              f"(evals.csv has no DV columns — run with updated optimizer "
+              f"to get full history)")
+        return X, Y, d.get("best_obj"), d.get("total_evals", len(population))
+
+    else:
+        sys.exit(
+            f"No checkpoint found in {output_dir}\n"
+            f"Expected bo_checkpoint.pkl (SAASBO) or de_checkpoint.pkl (DE)."
+        )
 
 
 def load_run_names(output_dir):
@@ -360,7 +416,7 @@ def main():
 
     # ── Source ───────────────────────────────────────────────────────────────
     p.add_argument("--output-dir",  default="opt_results",
-                   help="Directory containing bo_checkpoint.pkl and run_args.txt")
+                   help="Directory containing bo_checkpoint.pkl or de_checkpoint.pkl and run_args.txt")
     p.add_argument("--review-dir",  default=None,
                    help="Where to write review outputs. "
                         "Default: <output-dir>/review/")

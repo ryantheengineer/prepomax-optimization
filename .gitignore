@@ -38,4 +38,4 @@ determineMaterialProperties/pmx_files/v3/
 *.node
 *.blend1
 *.pkl
-optimizeGeometry/output/
+optimizeGeometry/optimization_runs

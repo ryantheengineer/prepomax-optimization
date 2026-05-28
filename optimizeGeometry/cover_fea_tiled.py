@@ -184,6 +184,14 @@ class FEAConfig:
     sharp corners while keeping OCC numerically stable. Increase to 0.5mm
     if geometry failures persist on steep height gradients."""
 
+    smooth_sigma: float              = 0.0
+    """Gaussian smoothing sigma applied to the combined height field before
+    geometry construction, in units of grid spacings.  0.0 = no smoothing.
+    Values of 0.5-1.5 limit height gradients and reduce mesh intersection
+    failures without dramatically changing the structural character of the
+    surface.  The smoothing is applied on a regular internal grid then
+    interpolated back to the mesh nodes."""
+
     # Combined height range: [0, global_max + tile_max]
     # This replaces the single perturb_max from cover_fea.py.
     @property
@@ -349,6 +357,11 @@ def evaluate_tiled_surface(dv: np.ndarray, cfg: "FEAConfig",
 
     Returns height values in [0, cfg.global_max + cfg.tile_max].
 
+    If cfg.smooth_sigma > 0, applies Gaussian smoothing on a regular internal
+    grid before interpolating to the query points. This limits height gradients
+    and prevents inner/outer surface intersections during geometry construction,
+    without changing the structural character of the surface.
+
     Parameters
     ----------
     dv  : full DV vector, length = get_dv_shape(cfg)
@@ -374,22 +387,67 @@ def evaluate_tiled_surface(dv: np.ndarray, cfg: "FEAConfig",
     L_x   = BX_O  - 0.0   + 1e-9
     L_z   = 0.0   - Z_MIN + 1e-9
 
-    h_global = _fourier_surface(
-        global_coeffs, np.abs(x), z,   # abs(x) for symmetry
+    sigma = getattr(cfg, "smooth_sigma", 0.0)
+
+    if sigma <= 0.0:
+        # No smoothing — evaluate directly at query points
+        h_global = _fourier_surface(
+            global_coeffs, np.abs(x), z,
+            L_x, L_z,
+            cfg.n_global_x, cfg.n_global_z,
+            cfg.global_max
+        )
+        h_tile = _tiled_fourier_surface(
+            tile_coeffs, np.abs(x), z,
+            cfg.tile_x, cfg.tile_z,
+            cfg.n_tile_x, cfg.n_tile_z,
+            cfg.tile_max
+        )
+        return np.clip(h_global + h_tile, 0.0, cfg.global_max + cfg.tile_max)
+
+    # ── Smoothed path ─────────────────────────────────────────────────────────
+    # Evaluate on a regular grid fine enough to resolve tile features,
+    # apply Gaussian smoothing, then interpolate to query points.
+    # Grid spacing: tile_size / 8 to adequately sample tile features.
+    gs = min(cfg.tile_x, cfg.tile_z) / 8.0
+
+    x_grid = np.arange(0.0,    BX_O + gs, gs)
+    z_grid = np.arange(Z_MIN, 0.0  + gs, gs)
+    XX, ZZ = np.meshgrid(x_grid, z_grid)
+    xx_flat = XX.ravel()
+    zz_flat = ZZ.ravel()
+
+    h_global_grid = _fourier_surface(
+        global_coeffs, xx_flat, zz_flat,
         L_x, L_z,
         cfg.n_global_x, cfg.n_global_z,
         cfg.global_max
-    )
+    ).reshape(XX.shape)
 
-    # Tile layer: full-period tiling
-    h_tile = _tiled_fourier_surface(
-        tile_coeffs, np.abs(x), z,     # abs(x) for symmetry
+    h_tile_grid = _tiled_fourier_surface(
+        tile_coeffs, xx_flat, zz_flat,
         cfg.tile_x, cfg.tile_z,
         cfg.n_tile_x, cfg.n_tile_z,
         cfg.tile_max
-    )
+    ).reshape(XX.shape)
 
-    return np.clip(h_global + h_tile, 0.0, cfg.global_max + cfg.tile_max)
+    h_combined = h_global_grid + h_tile_grid
+
+    # Apply Gaussian smoothing — sigma is in grid spacings
+    from scipy.ndimage import gaussian_filter
+    h_smoothed = gaussian_filter(h_combined, sigma=sigma, mode="nearest")
+    h_smoothed = np.clip(h_smoothed, 0.0, cfg.global_max + cfg.tile_max)
+
+    # Interpolate smoothed grid to query points using bilinear interpolation
+    from scipy.interpolate import RegularGridInterpolator
+    interp = RegularGridInterpolator(
+        (z_grid, x_grid), h_smoothed,
+        method="linear", bounds_error=False,
+        fill_value=None   # extrapolate at edges
+    )
+    # Query points: use abs(x) for symmetry, same as unsmoothed path
+    h_query = interp(np.column_stack([z, np.abs(x)]))
+    return np.clip(h_query, 0.0, cfg.global_max + cfg.tile_max)
 
 
 def _height_at(x: float, z: float, dv: np.ndarray, cfg: "FEAConfig") -> float:
@@ -505,6 +563,14 @@ class FEAConfig:
     sharp corners while keeping OCC numerically stable. Increase to 0.5mm
     if geometry failures persist on steep height gradients."""
 
+    smooth_sigma: float              = 0.0
+    """Gaussian smoothing sigma applied to the combined height field before
+    geometry construction, in units of grid spacings.  0.0 = no smoothing.
+    Values of 0.5-1.5 limit height gradients and reduce mesh intersection
+    failures without dramatically changing the structural character of the
+    surface.  The smoothing is applied on a regular internal grid then
+    interpolated back to the mesh nodes."""
+
     # Combined height range: [0, global_max + tile_max]
     # This replaces the single perturb_max from cover_fea.py.
     @property
@@ -526,6 +592,12 @@ class FEAConfig:
     # ── Output ──────────────────────────────────────────────────────────────
     output_dir: str                  = "."
     """Directory for .inp and result files."""
+
+    cleanup_fea_files: bool          = False
+    """If True, delete all CalculiX files (.inp, .frd, .sta, .dat, .cvg, .12d)
+    immediately after each FEA evaluation completes and results are parsed.
+    Saves substantial disk space during long optimization runs.
+    The evals.csv and checkpoint files are never deleted."""
 
     # ── Material (PET, MM_TON_S_C) ──────────────────────────────────────────
     mat_name:    str                 = "Polycarbonate"
@@ -593,96 +665,137 @@ def _dv_array_to_grid(dv_array, perturb_max):
 # =============================================================================
 
 def _build_thick_solid_occ(inner_verts, inner_tris, outer_verts, rim_tris,
-                            fillet_radius=0.1):
+                            fillet_radius=0.1, mesh_size=10.0):
     """
-    Build a closed triangulated solid using OCC's BRepBuilderAPI_Sewing.
+    Build a closed solid using OCC's BRepOffsetAPI_MakeThickSolid.
 
-    OCC's sewing algorithm correctly handles sharp corners between adjacent
-    faces by finding shared edges and merging them within the sewing tolerance
-    (fillet_radius).  This replaces the manual node-offset approach which
-    produces geometrically invalid overlapping surfaces at sharp height
-    transitions.
+    Strategy:
+      1. Sew the inner face triangles into a closed inner shell
+      2. Use BRepOffsetAPI_MakeThickSolid to offset outward by wall thickness T
+      3. OCC handles corner geometry correctly — sharp corners get mitered,
+         avoiding the intersection problem of the manual node-offset approach
 
-    fillet_radius : mm — sewing tolerance.  0.1mm approximates sharp corners
-                   while keeping OCC numerically stable.  Increase to 0.5mm
-                   if failures persist on very steep height gradients.
-
-    Returns (verts, faces) for TetGen, or (None, None) on failure.
-    Falls back silently so _build_solid_surface can use the manual approach.
+    Returns (verts, faces, reason) where reason is a short string describing
+    why OCC succeeded or failed — always returned for diagnostics.
+    On failure: (None, None, reason_string).
     """
     try:
         from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakePolygon,
                                          BRepBuilderAPI_MakeFace,
                                          BRepBuilderAPI_Sewing,
                                          BRepBuilderAPI_MakeSolid)
+        from OCP.BRepOffsetAPI import BRepOffsetAPI_MakeThickSolid
         from OCP.BRepMesh import BRepMesh_IncrementalMesh
         from OCP.BRep import BRep_Tool
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopAbs import TopAbs_FACE, TopAbs_SHELL
         from OCP.TopoDS import TopoDS
+        from OCP.TopTools import TopTools_ListOfShape
         from OCP.gp import gp_Pnt
+        import numpy as np
     except ImportError:
-        return None, None
+        return None, None, "OCP not installed"
 
+    # ── Step 1: sew inner triangles into a shell ──────────────────────────────
     sewing = BRepBuilderAPI_Sewing(max(float(fillet_radius), 0.01))
+    faces_added = 0
 
-    def _add_tri(verts_arr, a, b, c):
+    for a, b, c in inner_tris:
         try:
-            p1 = gp_Pnt(float(verts_arr[a][0]),
-                        float(verts_arr[a][1]),
-                        float(verts_arr[a][2]))
-            p2 = gp_Pnt(float(verts_arr[b][0]),
-                        float(verts_arr[b][1]),
-                        float(verts_arr[b][2]))
-            p3 = gp_Pnt(float(verts_arr[c][0]),
-                        float(verts_arr[c][1]),
-                        float(verts_arr[c][2]))
+            p1 = gp_Pnt(float(inner_verts[a][0]), float(inner_verts[a][1]),
+                        float(inner_verts[a][2]))
+            p2 = gp_Pnt(float(inner_verts[b][0]), float(inner_verts[b][1]),
+                        float(inner_verts[b][2]))
+            p3 = gp_Pnt(float(inner_verts[c][0]), float(inner_verts[c][1]),
+                        float(inner_verts[c][2]))
             if (p1.IsEqual(p2, 1e-6) or p2.IsEqual(p3, 1e-6) or
                     p1.IsEqual(p3, 1e-6)):
-                return
+                continue
             poly = BRepBuilderAPI_MakePolygon(p1, p2, p3, True)
             if not poly.IsDone():
-                return
+                continue
             face = BRepBuilderAPI_MakeFace(poly.Wire(), True)
             if face.IsDone():
                 sewing.Add(face.Face())
+                faces_added += 1
         except Exception:
-            pass
+            continue
 
-    import numpy as np
-    N     = len(inner_verts)
-    all_v = np.vstack([inner_verts, outer_verts])
-
-    for a, b, c in inner_tris:
-        _add_tri(inner_verts, a, b, c)       # inner face
-    for a, b, c in inner_tris:
-        _add_tri(outer_verts, c, b, a)       # outer face (reversed winding)
-    for tri in rim_tris:
-        _add_tri(all_v, tri[0], tri[1], tri[2])   # rim
+    if faces_added == 0:
+        return None, None, "no valid inner faces built"
 
     sewing.Perform()
     sewn = sewing.SewedShape()
     if sewn.IsNull():
-        return None, None
+        return None, None, "sewing produced null shape"
 
+    # Convert sewn shape to solid shell
     solid_builder = BRepBuilderAPI_MakeSolid()
     exp = TopExp_Explorer(sewn, TopAbs_SHELL)
     n_shells = 0
     while exp.More():
-        solid_builder.Add(exp.Current())
-        n_shells += 1
+        try:
+            shell = TopoDS.Shell_s(exp.Current())
+            solid_builder.Add(shell)
+            n_shells += 1
+        except Exception:
+            pass
         exp.Next()
 
-    if n_shells == 0 or not solid_builder.IsDone():
-        return None, None
+    if n_shells == 0:
+        return None, None, "no shells found in sewn shape"
+    if not solid_builder.IsDone():
+        return None, None, "MakeSolid failed"
 
-    solid = solid_builder.Solid()
-    BRepMesh_IncrementalMesh(solid, 1.0, False, 0.5)
+    inner_solid = solid_builder.Solid()
+
+    # ── Step 2: compute wall thickness from vertex offset ─────────────────────
+    # Estimate T from the distance between corresponding inner/outer vertices
+    T = float(np.linalg.norm(
+        np.array(outer_verts[0]) - np.array(inner_verts[0])
+    ))
+    if T < 0.1:
+        return None, None, f"wall thickness T={T:.4f} too small"
+
+    # ── Step 3: BRepOffsetAPI_MakeThickSolid ─────────────────────────────────
+    # Offset the inner solid outward by T to create the wall
+    # faces_to_remove: empty list means offset all faces (creates shell)
+    faces_to_remove = TopTools_ListOfShape()
+
+    thick_reason = "unknown"
+    try:
+        thick = BRepOffsetAPI_MakeThickSolid()
+        thick.MakeThickSolidBySimple(inner_solid, T)
+        thick.Build()
+        if not thick.IsDone():
+            raise RuntimeError("MakeThickSolidBySimple not done")
+        result_solid = thick.Shape()
+    except Exception as e1:
+        thick_reason = str(e1)
+        # Fallback: try MakeThickSolidByJoin if Simple fails
+        try:
+            thick2 = BRepOffsetAPI_MakeThickSolid()
+            thick2.MakeThickSolidByJoin(
+                inner_solid, faces_to_remove,
+                T, max(fillet_radius, 0.01),
+                1,   # BRepOffset_Skin
+                False, False, 4  # GeomAbs_Intersection
+            )
+            thick2.Build()
+            if not thick2.IsDone():
+                raise RuntimeError("MakeThickSolidByJoin not done")
+            result_solid = thick2.Shape()
+        except Exception as e2:
+            thick_reason = str(e2)
+            return None, None, f"ThickSolid failed: {thick_reason}"
+
+    # ── Step 4: triangulate for TetGen ───────────────────────────────────────
+    BRepMesh_IncrementalMesh(result_solid, float(mesh_size), False, 0.5)
 
     verts_out = []
     faces_out = []
     offset    = 0
-    exp2 = TopExp_Explorer(solid, TopAbs_FACE)
+    exp2 = TopExp_Explorer(result_solid, TopAbs_FACE)
     while exp2.More():
         face = TopoDS.Face_s(exp2.Current())
         loc  = face.Location()
@@ -701,10 +814,11 @@ def _build_thick_solid_occ(inner_verts, inner_tris, outer_verts, rim_tris,
         exp2.Next()
 
     if not verts_out:
-        return None, None
+        return None, None, "triangulation produced no vertices"
 
     return (np.array(verts_out, dtype=np.float64),
-            np.array(faces_out, dtype=np.int32))
+            np.array(faces_out, dtype=np.int32),
+            "ok")
 
 def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     """
@@ -827,21 +941,9 @@ def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     tris0_arr = np.array(tris0,  dtype=np.int32)
     rim_arr   = np.array(rim,    dtype=np.int32)
 
-    # ── Try OCC sewing first (handles sharp corners correctly) ────────────────
-    try:
-        occ_verts, occ_faces = _build_thick_solid_occ(
-            inner_arr, tris0_arr, outer_arr, rim_arr,
-            fillet_radius=cfg.fillet_radius,
-        )
-        if occ_verts is not None and len(occ_verts) > 0:
-            print(f"  OCC solid: {len(occ_verts)} verts, {len(occ_faces)} faces")
-            return occ_verts, occ_faces
-        else:
-            print("  OCC solid returned empty — falling back to manual offset")
-    except Exception as e:
-        print(f"  OCC solid error ({e}) — falling back to manual offset")
-
-    # ── Manual offset fallback ────────────────────────────────────────────────
+    # ── Build manual offset solid first ───────────────────────────────────────
+    # The manual offset is what TetGen reliably handles. We build it first,
+    # check if it's watertight, and only invoke OCC if it isn't.
     all_verts = np.array(inner_v + outer_v, dtype=np.float64)
     all_faces = np.vstack([
         np.array([[f[0],f[1],f[2]]       for f in tris0], dtype=np.int32),
@@ -854,8 +956,42 @@ def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     _areas=np.linalg.norm(np.cross(_b-_a,_c-_a),axis=1)/2.0
     _keep=_areas>1e-10
     if (~_keep).sum(): print(f"  Removed {(~_keep).sum()} zero-area faces")
-    all_faces=all_faces[_keep]
-    print(f"  Closed solid surface: {len(all_verts)} verts, {len(all_faces)} faces")
+    all_faces = all_faces[_keep]
+
+    # Check watertightness of manual mesh
+    try:
+        import trimesh as _trimesh
+        _surf = _trimesh.Trimesh(vertices=all_verts, faces=all_faces, process=True)
+        _trimesh.repair.fix_normals(_surf)
+        _trimesh.repair.fill_holes(_surf)
+        manual_watertight = _surf.is_watertight
+    except Exception:
+        manual_watertight = True   # assume OK, TetGen will tell us
+
+    if manual_watertight:
+        # Manual offset produced a valid mesh — use it directly, TetGen handles it well
+        print(f"  Closed solid surface: {len(all_verts)} verts, {len(all_faces)} faces "
+              f"(watertight, using manual offset)")
+        return all_verts, all_faces
+
+    # ── Manual offset not watertight — try OCC ────────────────────────────────
+    # OCC handles sharp corners correctly but produces mesh topology that can
+    # cause TetGen heap corruption, so we only use it as a fallback.
+    print(f"  Manual offset not watertight — trying OCC solid...")
+    occ_verts, occ_faces, occ_reason = _build_thick_solid_occ(
+        inner_arr, tris0_arr, outer_arr, rim_arr,
+        fillet_radius=cfg.fillet_radius,
+        mesh_size=cfg.surface_mesh_size,
+    )
+    if occ_verts is not None and len(occ_verts) > 0:
+        print(f"  OCC solid: {len(occ_verts)} verts, {len(occ_faces)} faces")
+        return occ_verts, occ_faces
+    else:
+        print(f"  OCC solid failed [{occ_reason}] — using non-watertight manual offset")
+
+    # Last resort: return the non-watertight manual mesh and let trimesh repair handle it
+    print(f"  Closed solid surface: {len(all_verts)} verts, {len(all_faces)} faces "
+          f"(not watertight — trimesh repair will attempt fix)")
     return all_verts, all_faces
 
 
@@ -911,8 +1047,25 @@ def _tetrahedralise(verts, faces, cfg: FEAConfig, timeout: int = 300):
     surf = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
     trimesh.repair.fix_normals(surf)
     trimesh.repair.fill_holes(surf)
+
+    # If still not watertight, try more aggressive repair
+    if not surf.is_watertight:
+        # Remove degenerate and duplicate faces
+        surf.remove_degenerate_faces()
+        surf.remove_duplicate_faces()
+        surf.remove_unreferenced_vertices()
+        trimesh.repair.fix_winding(surf)
+        trimesh.repair.fill_holes(surf)
+
     print(f"    {len(surf.vertices)} verts, {len(surf.faces)} faces "
           f"(watertight: {surf.is_watertight})")
+    if not surf.is_watertight:
+        bounds = surf.bounds
+        print(f"    WARNING: surface not watertight after repair — "
+              f"TetGen may fail. "
+              f"Bounds: x=[{bounds[0,0]:.1f},{bounds[1,0]:.1f}] "
+              f"y=[{bounds[0,1]:.1f},{bounds[1,1]:.1f}] "
+              f"z=[{bounds[0,2]:.1f},{bounds[1,2]:.1f}]")
 
     vol_info = f", max vol {cfg.max_tet_vol:.0f} mm³" if cfg.max_tet_vol else ""
     print(f"  Tetrahedralising (max edge {cfg.surface_mesh_size} mm, "
@@ -1327,6 +1480,23 @@ def _check_mesh_vs_tile(cfg: FEAConfig) -> list:
     return warnings
 
 
+def _cleanup_run_files(stem: str) -> None:
+    """
+    Delete all CalculiX files associated with a single run.
+    stem is the full path prefix, e.g. /path/to/output/gen0001_eval00042
+
+    Extensions deleted: .inp .frd .sta .dat .cvg .12d
+    The function is silent — missing files are ignored.
+    """
+    for ext in (".inp", ".frd", ".sta", ".dat", ".cvg", ".12d"):
+        path = stem + ext
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
     """
     Full pipeline: geometry → mesh → .inp → (optionally) CalculiX.
@@ -1438,6 +1608,11 @@ def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
             print(f"  Location:          ({location[0]:.1f}, "
                   f"{location[1]:.1f}, {location[2]:.1f}) mm")
 
+    # Clean up per-run CalculiX files to save disk space
+    if cfg.cleanup_fea_files and cfg.ccx:
+        stem = os.path.splitext(out)[0]
+        _cleanup_run_files(stem)
+
     return {
         "max_neg_y":      max_neg_y,
         "max_total_disp": max_total_disp,
@@ -1509,6 +1684,13 @@ def main():
                    help="Fillet radius (mm) for OCC solid corner handling. "
                         "0.1mm approximates sharp corners. Increase to 0.5mm "
                         "if geometry failures persist.")
+    p.add_argument("--smooth-sigma", type=float,
+                   default=cfg_default.smooth_sigma,
+                   help="Gaussian smoothing sigma (in grid spacings) applied "
+                        "to the height field before geometry construction. "
+                        "0.0 = no smoothing. 0.5-1.5 limits height gradients "
+                        "and reduces mesh intersection failures. Start with "
+                        "0.5 and increase if failures persist.")
     # ── DV initialisation ─────────────────────────────────────────────────────
     p.add_argument("--seed",        type=int, default=42,
                    help="Random seed for DV initialisation")
@@ -1523,6 +1705,11 @@ def main():
                    help="Build geometry and mesh, write .inp, but skip CalculiX. "
                         "Open the .inp in PrePoMax to inspect the mesh before "
                         "committing to a full run.")
+    p.add_argument("--cleanup-fea-files", action="store_true",
+                   default=False,
+                   help="Delete .inp, .frd, .sta, .dat, .cvg, .12d files after "
+                        "each FEA evaluation. Saves disk space on long runs. "
+                        "The evals.csv, checkpoint, and best_dv.csv are kept.")
 
     args = p.parse_args()
 
@@ -1546,6 +1733,8 @@ def main():
         tile_z            = args.tile_z,
         tile_max          = args.tile_max,
         fillet_radius     = args.fillet_radius,
+        smooth_sigma      = args.smooth_sigma,
+        cleanup_fea_files = args.cleanup_fea_files,
         output_dir        = args.output_dir,
     )
 
