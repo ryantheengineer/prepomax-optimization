@@ -275,33 +275,79 @@ def plot_progress(output_dir):
 
 
 def save_run_args(args, output_dir):
-    """Write original and resume commands to run_args.txt."""
+    """
+    Write original and resume commands to run_args.txt in three formats:
+      1. Backslash-continuation (bash/linux style) — for readability
+      2. PowerShell single-line — paste directly into PowerShell terminal
+      3. Key=value pairs — used by _load_run_args() for auto-loading on resume
+    """
     path = os.path.join(output_dir, "run_args.txt")
     if os.path.exists(path):
         return   # don't overwrite on resume
-    arg_lines = ["python optimize_cover_de.py \\"]
-    for key, val in sorted(vars(args).items()):
-        if key == "resume":
-            continue
-        if val is None:
-            continue
-        flag = "--" + key.replace("_", "-")
-        if isinstance(val, bool):
-            if val:
-                arg_lines.append(f"    {flag} \\")
-        elif isinstance(val, (list, tuple)):
-            arg_lines.append(f"    {flag} {' '.join(str(v) for v in val)} \\")
-        else:
-            arg_lines.append(f"    {flag} {val} \\")
-    arg_lines[-1] = arg_lines[-1].rstrip(" \\")
-    original_cmd = "\n".join(arg_lines)
-    resume_lines = arg_lines[:-1] + [arg_lines[-1] + " \\", "    --resume"]
-    resume_cmd   = "\n".join(resume_lines)
+
+    def _build_args(include_resume=False):
+        """Return list of (flag, value_str) pairs."""
+        pairs = []
+        for key, val in sorted(vars(args).items()):
+            if key == "resume":
+                continue
+            if val is None:
+                continue
+            flag = "--" + key.replace("_", "-")
+            if isinstance(val, bool):
+                if val:
+                    pairs.append((flag, None))
+            elif isinstance(val, (list, tuple)):
+                pairs.append((flag, " ".join(str(v) for v in val)))
+            else:
+                # Quote values with spaces (e.g. ccx path)
+                s = str(val)
+                if " " in s:
+                    s = f'"{s}"'
+                pairs.append((flag, s))
+        if include_resume:
+            pairs.append(("--resume", None))
+        return pairs
+
+    def _multiline(pairs, script):
+        """Backslash-continuation format."""
+        bs = chr(92)  # backslash character, avoids escape issues
+        lines = ["python " + script + " " + bs]
+        for flag, val in pairs[:-1]:
+            if val is None:
+                lines.append("    " + flag + " " + bs)
+            else:
+                lines.append("    " + flag + " " + val + " " + bs)
+        flag, val = pairs[-1]
+        lines.append("    " + flag if val is None else "    " + flag + " " + val)
+        return "\n".join(lines)
+
+    def _oneline(pairs, script):
+        """Single-line format — paste directly into PowerShell."""
+        parts = [f"python {script}"]
+        for flag, val in pairs:
+            if val is None:
+                parts.append(flag)
+            else:
+                parts.append(f"{flag} {val}")
+        return " ".join(parts)
+
+    orig_pairs   = _build_args(include_resume=False)
+    resume_pairs = _build_args(include_resume=True)
+    script       = "optimize_cover_de.py"
+
     with open(path, "w") as f:
-        f.write("# Original command\n")
-        f.write(original_cmd + "\n\n")
-        f.write("# Resume command\n")
-        f.write(resume_cmd + "\n")
+        f.write("# Original command (backslash format)\n")
+        f.write(_multiline(orig_pairs, script) + "\n\n")
+
+        f.write("# Original command (PowerShell single-line)\n")
+        f.write(_oneline(orig_pairs, script) + "\n\n")
+
+        f.write("# Resume command (backslash format)\n")
+        f.write(_multiline(resume_pairs, script) + "\n\n")
+
+        f.write("# Resume command (PowerShell single-line -- paste this)\n")
+        f.write(_oneline(resume_pairs, script) + "\n")
 
 
 def _load_run_args(output_dir):
@@ -318,6 +364,7 @@ def _load_run_args(output_dir):
                   "mutation_lo", "mutation_hi", "recombination",
                   "fillet_radius", "smooth_sigma"}
     bool_args  = {"cleanup_fea_files"}
+    str_args   = {"load_type", "solver", "ccx"}
     found = {}
     with open(path) as f:
         for line in f:
@@ -328,6 +375,8 @@ def _load_run_args(output_dir):
             flag  = parts[0].lstrip("-").replace("-", "_")
             if flag in bool_args:
                 found[flag] = True
+            elif flag in str_args and len(parts) >= 2:
+                found[flag] = parts[1]
             elif len(parts) >= 2:
                 val = parts[1]
                 try:
@@ -452,6 +501,7 @@ def optimize(args):
         smooth_sigma      = args.smooth_sigma,
         fillet_radius     = args.fillet_radius,
         cleanup_fea_files = args.cleanup_fea_files,
+        load_type         = args.load_type,
         load_z            = args.load_z,
         load_radius       = args.load_radius,
         load_force        = args.load_force,
@@ -784,6 +834,9 @@ def main():
                    default=_d("tet_timeout", cfg_default.tet_timeout))
 
     # ── Load ──────────────────────────────────────────────────────────────────
+    p.add_argument("--load-type",   default=_d("load_type", cfg_default.load_type),
+                   choices=["circle", "full"],
+                   help="circle=circular patch, full=entire top surface.")
     p.add_argument("--load-z",      type=float,
                    default=_d("load_z",      cfg_default.load_z))
     p.add_argument("--load-radius", type=float,

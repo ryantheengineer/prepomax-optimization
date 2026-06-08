@@ -38,4 +38,5 @@ determineMaterialProperties/pmx_files/v3/
 *.node
 *.blend1
 *.pkl
-optimizeGeometry/optimization_runs
+optimizeGeometry/opt_runs
+optimizeGeometry/Denali_6038.stl

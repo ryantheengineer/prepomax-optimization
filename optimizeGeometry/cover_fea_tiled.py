@@ -76,8 +76,14 @@ ccb = None   # populated on first call to _build_solid_surface
 def _import_ccb():
     global ccb
     if ccb is None:
-        import create_cover_blend as _ccb
-        ccb = _ccb
+        try:
+            import create_cover_blend as _ccb
+            ccb = _ccb
+        except ImportError as e:
+            raise ImportError(
+                f"Cannot import create_cover_blend ({e}). "
+                f"Ensure OCP/CadQuery is installed and the venv is activated."
+            )
     return ccb
 
 # =============================================================================
@@ -145,6 +151,11 @@ class FEAConfig:
 
     load_force: float                = 1780.0
     """Total downward force (N) applied as a rigid-body load via the RP."""
+    load_type: str                   = "circle"
+    """How the load is applied:
+      "circle" — circular patch at (load_center_x, load_z) with load_radius.
+      "full"   — entire top surface (uniform distributed load / snow load).
+    When load_type="full", load_z and load_radius are ignored."""
 
     # ── Two-level tiled Fourier parameterisation ────────────────────────────
     # Global layer: low-order Fourier surface for large-scale structural shape
@@ -524,6 +535,11 @@ class FEAConfig:
 
     load_force: float                = 1780.0
     """Total downward force (N) applied as a rigid-body load via the RP."""
+    load_type: str                   = "circle"
+    """How the load is applied:
+      "circle" — circular patch at (load_center_x, load_z) with load_radius.
+      "full"   — entire top surface (uniform distributed load / snow load).
+    When load_type="full", load_z and load_radius are ignored."""
 
     # ── Two-level tiled Fourier parameterisation ────────────────────────────
     # Global layer: low-order Fourier surface for large-scale structural shape
@@ -830,7 +846,10 @@ def _build_solid_surface(cfg: FEAConfig, dv: np.ndarray):
     cfg : FEAConfig  — contains all tiling and mesh settings
     dv  : flat DV array of length get_dv_shape(cfg)
     """
-    ccb = _import_ccb()
+    try:
+        ccb = _import_ccb()
+    except ImportError as e:
+        raise RuntimeError(f"Geometry library unavailable: {e}")
     T = cfg.thickness
     orig_ms = ccb.MESH_SPACING
     ccb.MESH_SPACING = float(cfg.surface_mesh_size)
@@ -1597,21 +1616,25 @@ def run(dv, cfg: FEAConfig, name: str = "cover_analysis") -> dict:
     location       = None
     frd_path       = None
 
-    if cfg.ccx:
-        max_neg_y, max_nid, max_total_disp, frd_path = _run_ccx(out, cfg.ccx)
-        if max_nid is not None and 1 <= max_nid <= len(nodes_arr):
-            x, y, z  = nodes_arr[max_nid-1]
-            location = (float(x), float(y), float(z))
-        print(f"  Max -Y deflection: {max_neg_y:.6f} mm")
-        print(f"  Max total disp:    {max_total_disp:.6f} mm")
-        if location:
-            print(f"  Location:          ({location[0]:.1f}, "
-                  f"{location[1]:.1f}, {location[2]:.1f}) mm")
-
-    # Clean up per-run CalculiX files to save disk space
-    if cfg.cleanup_fea_files and cfg.ccx:
-        stem = os.path.splitext(out)[0]
-        _cleanup_run_files(stem)
+    try:
+        if cfg.ccx:
+            max_neg_y, max_nid, max_total_disp, frd_path = _run_ccx(out, cfg.ccx)
+            if max_nid is not None and 1 <= max_nid <= len(nodes_arr):
+                x, y, z  = nodes_arr[max_nid-1]
+                location = (float(x), float(y), float(z))
+            print(f"  Max -Y deflection: {max_neg_y:.6f} mm")
+            print(f"  Max total disp:    {max_total_disp:.6f} mm")
+            if location:
+                print(f"  Location:          ({location[0]:.1f}, "
+                      f"{location[1]:.1f}, {location[2]:.1f}) mm")
+    finally:
+        # Always clean up per-run files when requested — runs whether CalculiX
+        # succeeded, failed, crashed, or timed out.  Also cleans up .inp files
+        # left behind by failed geometry/TetGen runs since out is always defined
+        # by the time we reach Step 4.
+        if cfg.cleanup_fea_files:
+            stem = os.path.splitext(out)[0]
+            _cleanup_run_files(stem)
 
     return {
         "max_neg_y":      max_neg_y,
@@ -1646,12 +1669,16 @@ def main():
                    default=cfg_default.min_tet_quality)
     p.add_argument("--thickness",         type=float,
                    default=cfg_default.thickness)
+    p.add_argument("--load-type",         default=cfg_default.load_type,
+                   choices=["circle", "full"],
+                   help="circle=circular patch (foot/point load), "
+                        "full=entire top surface (snow load).")
     p.add_argument("--load-z",            type=float,
                    default=cfg_default.load_z,
-                   help="Load circle centre Z mm (negative = into well)")
+                   help="Load circle centre Z mm (circle mode only).")
     p.add_argument("--load-radius",       type=float,
                    default=cfg_default.load_radius,
-                   help="Load circle radius mm")
+                   help="Load circle radius mm (circle mode only).")
     p.add_argument("--load-force",        type=float,
                    default=cfg_default.load_force,
                    help="Total load force N")
@@ -1718,6 +1745,7 @@ def main():
         max_tet_vol       = args.max_tet_vol,
         min_tet_quality   = args.min_tet_quality,
         thickness         = args.thickness,
+        load_type         = args.load_type,
         load_z            = args.load_z,
         load_radius       = args.load_radius,
         load_force        = args.load_force,

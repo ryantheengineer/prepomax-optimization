@@ -219,7 +219,7 @@ def load_run_names(output_dir):
 # =============================================================================
 # SURFACE EVALUATION
 # =============================================================================
-def compute_surface(dv, cfg, vis_spacing=None):
+def compute_surface(dv, cfg, vis_spacing=None, vis_smooth_sigma=1.0):
     """
     Return (X_grid, Z_grid, H_grid, inside_mask) for the FULL symmetric cover.
 
@@ -454,7 +454,10 @@ def main():
                    default=_run_args.get("tile_max", cfg_default.tile_max),
                    help="Max tile layer height (mm) — loaded from run_args.txt")
     p.add_argument("--vis-spacing", type=float, default=None,
-                   help="Visualisation grid spacing (mm). Defaults to tile_size/8.")
+                   help="Visualisation grid spacing (mm). Defaults to tile_size/4.")
+    p.add_argument("--vis-smooth-sigma", type=float, default=1.0,
+                   help="Gaussian smoothing sigma for visualisation only. "
+                        "Default 1.0. Set 0 to show raw surface.")
 
     # ── Layout ───────────────────────────────────────────────────────────────
     p.add_argument("--cols",    type=int,   default=3,
@@ -473,6 +476,14 @@ def main():
     print(f"Loading checkpoint from {args.output_dir}...")
     X, Y, best_obj, total_evals = load_checkpoint(args.output_dir)
     run_names = load_run_names(args.output_dir)
+    # Filter out physically impossible values — zero deflection means a
+    # corrupted row or a failed eval logged without the failed=1 flag
+    valid_mask = Y > 0.1
+    if valid_mask.sum() < len(Y):
+        print(f"  Filtered {len(Y) - valid_mask.sum()} zero/near-zero values "
+              f"(likely logging errors)")
+        X = X[valid_mask]
+        Y = Y[valid_mask]
     n_obs = len(Y)
     best_mm = float(np.min(Y))
 
@@ -534,12 +545,15 @@ def main():
     # ── Pre-compute all surfaces ───────────────────────────────────────────────
     print("  Computing surfaces...")
     # Render at a finer grid than the optimisation grid for smoother plots
-    vis_spacing = args.vis_spacing  # None → compute_surface uses tile_size/8
-    _eff = vis_spacing or min(cfg.tile_x, cfg.tile_z) / 8.0
-    print(f"  Visualisation grid spacing: {_eff:.1f} mm")
+    vis_spacing = args.vis_spacing  # None → compute_surface uses tile_size/4
+    _eff = vis_spacing or min(cfg.tile_x, cfg.tile_z) / 12.0
+    print(f"  Visualisation grid spacing: {_eff:.1f} mm  "
+          f"vis_smooth_sigma={args.vis_smooth_sigma}")
     surfaces = []
     for idx in selected:
-        X2d, Z2d, H2d, quad_inside = compute_surface(X[idx], cfg, vis_spacing=vis_spacing)
+        X2d, Z2d, H2d, quad_inside = compute_surface(
+            X[idx], cfg, vis_spacing=vis_spacing,
+            vis_smooth_sigma=args.vis_smooth_sigma)
         surfaces.append((X2d, Z2d, H2d, quad_inside))
 
     # ── Individual PNGs ───────────────────────────────────────────────────────
