@@ -214,6 +214,9 @@ def build_fea_config(run_args: dict) -> FEAConfig:
     for src, dst in float_fields.items():
         if src in run_args:
             setattr(cfg, dst, float(run_args[src]))
+    cfg._smooth_sigma = float(run_args.get("smooth_sigma", 0.0))
+    if cfg._smooth_sigma > 0:
+        print(f"  Gaussian smoothing: sigma={cfg._smooth_sigma} grid spacings")
     return cfg
 
 
@@ -272,38 +275,58 @@ def cover_extents(cfg: FEAConfig):
 # Cover mesh generation via create_cover_blend.py geometry pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_dv_grid_from_tiled_surface(dv: np.ndarray, cfg: FEAConfig) -> dict:
+def apply_fourier_perturbations_exact(nodes: list, dv: np.ndarray, cfg: FEAConfig):
     """
-    Build a dv_grid dict {(ix, iz): height_mm} compatible with
-    create_cover_blend.py's apply_perturbations / bilinear_interp functions.
-
-    create_cover_blend uses a grid of spacing GRID_SPACING (25mm) where:
-      ix >= 0  (symmetry: abs(x) is used)
-      iz <= -1 (perturbation tapers to 0 at Z=0 back edge)
-
-    We evaluate the tiled Fourier surface at each grid node position and use
-    that as the height perturbation, matching exactly what cover_fea_tiled does.
+    Evaluate the Fourier surface at each mesh node, apply the same Gaussian
+    smoothing used in FEA (cfg._smooth_sigma grid spacings), then set Y.
+    Matches exactly what cover_fea_tiled does before FEA evaluation.
     """
-    from create_cover_blend import (
-        GRID_SPACING, ARC1_OFF, BX_O,
-        make_dv_grid, bilinear_interp,
-    )
+    from create_cover_blend import LIP_HEIGHT, GRID_SPACING
+    from scipy.ndimage import gaussian_filter
+    from scipy.interpolate import RegularGridInterpolator
 
-    Z_MIN  = ARC1_OFF['cz'] - ARC1_OFF['r']  # front apex Z
-    ix_max = int(np.ceil(BX_O / GRID_SPACING)) + 1
-    iz_min = int(np.floor(Z_MIN / GRID_SPACING)) - 1
-    iz_max = -1
+    top_indices = [i for i, (x, y, z) in enumerate(nodes) if abs(y) < 0.5]
+    if not top_indices:
+        return
 
-    dv_grid = {}
-    for ix in range(0, ix_max + 1):
-        for iz in range(iz_min, iz_max + 1):
-            x = float(ix * GRID_SPACING)
-            z = float(iz * GRID_SPACING)
-            # evaluate_tiled_surface returns height at (x, z)
-            h = float(evaluate_tiled_surface(dv, cfg, np.array([x]), np.array([z]))[0])
-            dv_grid[(ix, iz)] = max(0.0, h)   # perturbations are non-negative in the original
+    smooth_sigma = getattr(cfg, '_smooth_sigma', 0.0)
+    xs_nodes = np.array([nodes[i][0] for i in top_indices])
+    zs_nodes = np.array([nodes[i][2] for i in top_indices])
 
-    return dv_grid
+    if smooth_sigma > 0:
+        # Use same grid spacing as cover_fea_tiled: tile_size/8
+        # This matches the smoothing grid FEA actually used.
+        fea_gs = min(cfg.tile_x, cfg.tile_z) / 8.0
+        x_min, x_max = xs_nodes.min(), xs_nodes.max()
+        z_min, z_max = zs_nodes.min(), zs_nodes.max()
+        gx = np.arange(x_min, x_max + fea_gs, fea_gs)
+        gz = np.arange(z_min, z_max + fea_gs, fea_gs)
+        GX, GZ = np.meshgrid(gx, gz)
+        # Evaluate without smoothing (cfg has smooth_sigma set, so temporarily zero it)
+        _orig_sigma = getattr(cfg, 'smooth_sigma', 0.0)
+        cfg.smooth_sigma = 0.0
+        GH = evaluate_tiled_surface(dv, cfg, GX.ravel(), GZ.ravel()).reshape(GX.shape)
+        cfg.smooth_sigma = _orig_sigma
+        GH_smooth = gaussian_filter(GH, sigma=smooth_sigma)
+        interp = RegularGridInterpolator(
+            (gz, gx), GH_smooth, method='linear', bounds_error=False, fill_value=0.0)
+        hs = interp(np.column_stack([zs_nodes, xs_nodes]))
+    else:
+        hs = evaluate_tiled_surface(dv, cfg, xs_nodes, zs_nodes)
+
+    top_y = {}
+    for idx, i in enumerate(top_indices):
+        h = float(hs[idx])
+        nodes[i][1] = h
+        top_y[(round(nodes[i][0], 3), round(nodes[i][2], 3))] = h
+
+    for i, (x, y, z) in enumerate(nodes):
+        if -LIP_HEIGHT + 0.5 < y < -0.5:
+            key  = (round(x, 3),  round(z, 3))
+            mkey = (round(-x, 3), round(z, 3))
+            y_top = top_y.get(key) or top_y.get(mkey) or 0.0
+            frac = abs(y) / LIP_HEIGHT
+            nodes[i][1] = y_top * (1 - frac) + (-LIP_HEIGHT) * frac
 
 
 def export_cover_obj(dv: np.ndarray, cfg: FEAConfig, obj_path: Path,
@@ -318,7 +341,7 @@ def export_cover_obj(dv: np.ndarray, cfg: FEAConfig, obj_path: Path,
     """
     from create_cover_blend import (
         build_main_face, triangulate_shape, build_lip_mesh_grid,
-        apply_perturbations, write_obj, check_manifold,
+        write_obj, check_manifold,
         BLENDER_SCRIPT,
     )
     import tempfile, subprocess, shutil
@@ -337,11 +360,10 @@ def export_cover_obj(dv: np.ndarray, cfg: FEAConfig, obj_path: Path,
     script_path  = os.path.join(tmpdir, "blender_script.py")
     write_obj(smooth_path, nodes, tris)
 
-    # Apply tiled surface perturbations
+    # Apply Fourier surface heights directly at each node — no grid interpolation
     import copy
     nodes_perturbed = copy.deepcopy(nodes)
-    dv_grid = build_dv_grid_from_tiled_surface(dv, cfg)
-    apply_perturbations(nodes_perturbed, dv_grid)
+    apply_fourier_perturbations_exact(nodes_perturbed, dv, cfg)
     write_obj(perturb_path, nodes_perturbed, tris)
 
     # Use Blender to solidify and produce final OBJ via BLENDER_SCRIPT

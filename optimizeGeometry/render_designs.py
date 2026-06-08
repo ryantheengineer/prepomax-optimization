@@ -62,6 +62,9 @@ p.add_argument("--frames",         type=int, default=60,
                help="Number of frames for turntable video (default 60)")
 p.add_argument("--fps",            type=int, default=24,
                help="Frame rate for turntable video (default 24)")
+p.add_argument("--variant",        nargs="+", default=["clear", "smoked", "clay"],
+               choices=["clear", "smoked", "clay"],
+               help="Which material variants to render (default: all three)")
 p.add_argument("--cover-lift-mm",  type=float, default=2.0,
                help="How much to lift the cover above Z=0 (flange thickness, mm).")
 args = p.parse_args(script_args)
@@ -692,12 +695,13 @@ def main():
                                         cover_depth_mm=COVER_DEPTH_MM,
                                         cover_width_mm=COVER_WIDTH_MM)
 
-        # Three material variants: clear, smoked, clay
-        variants = [
-            ("clear",  mat_pc),
-            ("smoked", make_smoked_material()),
-            ("clay",   make_clay_material()),
-        ]
+        # Material variants — filtered by --variant arg
+        all_variants = {
+            "clear":  mat_pc,
+            "smoked": make_smoked_material(),
+            "clay":   make_clay_material(),
+        }
+        variants = [(k, v) for k, v in all_variants.items() if k in args.variant]
 
         for variant_name, cover_mat in variants:
             print(f"\n  Variant: {variant_name}")

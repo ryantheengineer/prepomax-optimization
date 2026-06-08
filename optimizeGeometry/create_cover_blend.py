@@ -46,7 +46,8 @@ ARC2_OFF  = dict(cx=184.658,   cz=-623.062, r=381.0)
 ARC3_OFF  = dict(cx=-5315.204, cz=1572.26,  r=6302.502)
 
 GRID_SPACING = 25.0     # mm - grid spacing for adjustable points
-MESH_SPACING = 5.0
+# GRID_SPACING = 25.0     # mm - grid spacing for adjustable points
+MESH_SPACING = 3.0
 LIP_HEIGHT   = 50.8
 PERTURB_MAX  = 50.8   # mm - max outward perturbation
 RANDOM_SEED  = 42
@@ -132,7 +133,8 @@ def triangulate_shape(shape):
     sewing = BRepBuilderAPI_Sewing(0.001)
     sewing.Add(shape); sewing.Perform()
     shape = sewing.SewedShape()
-    BRepMesh_IncrementalMesh(shape, MESH_SPACING, False, 0.5)
+    BRepMesh_IncrementalMesh(shape, MESH_SPACING, False, 0.1, True)
+    # BRepMesh_IncrementalMesh(shape, MESH_SPACING, False, 0.5)
     node_map={}; nodes=[]; tris=[]
     face_exp=TopExp_Explorer(shape, TopAbs_FACE)
     while face_exp.More():
