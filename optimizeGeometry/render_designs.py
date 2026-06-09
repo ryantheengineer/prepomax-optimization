@@ -56,6 +56,11 @@ p.add_argument("--resolution",     type=int, nargs=2, default=[1280, 1080],
                metavar=("W", "H"))
 p.add_argument("--open-template",  default=None,
                help="Optional .blend file to start from (e.g. with HDRI already set).")
+p.add_argument("--obj",            default=None,
+               help="Path to a specific OBJ file. If given, renders only that file "
+                    "(ignores --manifest design list, but still uses --manifest for metadata).")
+p.add_argument("--top-n",          type=int, default=None,
+               help="Only render the top N designs from the manifest")
 p.add_argument("--video",          action="store_true",
                help="Also render a 180 degree turntable video for each design and variant")
 p.add_argument("--frames",         type=int, default=60,
@@ -245,6 +250,43 @@ def make_galvanised_metal_material(name="PolypropyleneAgreeableGray"):
     return mat
 
 
+def _apply_smooth_by_angle(obj, angle_deg=30):
+    """
+    Apply smooth shading with an angle threshold, Blender 4.x compatible.
+    Uses bmesh to mark edges as sharp where the dihedral angle exceeds
+    angle_deg, then enables smooth shading + edge split for correct normals.
+    """
+    import bmesh as _bm
+    threshold = math.radians(angle_deg)
+
+    # Mark sharp edges via bmesh
+    bm = _bm.new()
+    bm.from_mesh(obj.data)
+    bm.edges.ensure_lookup_table()
+    for edge in bm.edges:
+        if not edge.smooth:
+            continue
+        linked = edge.link_faces
+        if len(linked) == 2:
+            n0 = linked[0].normal
+            n1 = linked[1].normal
+            angle = n0.angle(n1) if n0.length > 0 and n1.length > 0 else 0.0
+            edge.smooth = (angle < threshold)
+    bm.to_mesh(obj.data)
+    bm.free()
+
+    # Shade smooth on all faces, split normals at sharp edges
+    for poly in obj.data.polygons:
+        poly.use_smooth = True
+    obj.data.update()
+
+    # Edge split modifier respects sharp edge markings
+    mod = obj.modifiers.new("EdgeSplit", "EDGE_SPLIT")
+    mod.use_edge_angle = False   # use only explicitly marked sharp edges
+    mod.use_edge_sharp = True
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Scene objects
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,7 +343,7 @@ def add_studio_cyc(mat, width=10.0, depth=7.0, height=4.5, curve_radius=1.2):
     bpy.context.scene.collection.objects.link(obj)
     bpy.context.view_layer.objects.active = obj
     obj.select_set(True)
-    bpy.ops.object.shade_smooth()
+    _apply_smooth_by_angle(obj, angle_deg=30)
     obj.data.materials.append(mat)
     return obj
 
@@ -408,7 +450,7 @@ def import_cover_obj(obj_path: str, mat, well_rim_z: float = 0.0) -> bpy.types.O
     else:
         obj.data.materials.append(mat)
 
-    bpy.ops.object.shade_smooth()
+    _apply_smooth_by_angle(obj, angle_deg=30)
     return obj
 
 
@@ -565,63 +607,76 @@ def make_clay_material(name="ClayTan"):
 def render_turntable(output_dir: Path, base_name: str, well_obj, cover_obj,
                      cam_obj, n_frames: int = 60, fps: int = 24):
     """
-    Render a turntable video: camera orbits around Z axis from its start
-    position to the mirrored position (180°). Outputs individual PNGs then
-    calls ffmpeg to encode an MP4.
+    Render a 180° turntable using Blender's native H.264 video output.
+
+    The camera orbits around the negative Z axis, pivoting around the exact
+    look-at target point used in setup_camera — so framing stays consistent
+    with the still render throughout the move. Start position = still frame
+    camera position, end position = mirror across the target.
     """
     scene = bpy.context.scene
-    scene.render.image_settings.file_format = "PNG"
+    mp4_path = str((output_dir / f"{base_name}.mp4").resolve())
 
-    # Camera start position in XY plane
-    cam_start_x = cam_obj.location.x
-    cam_start_y = cam_obj.location.y
-    cam_start_z = cam_obj.location.z
-    start_angle  = math.atan2(cam_start_y, cam_start_x)   # current azimuth
-    end_angle    = start_angle + math.pi                   # mirrored = +180°
+    # Configure native video output — no ffmpeg needed
+    scene.render.image_settings.file_format = "FFMPEG"
+    scene.render.ffmpeg.format = "MPEG4"
+    scene.render.ffmpeg.codec = "H264"
+    scene.render.ffmpeg.constant_rate_factor = "HIGH"
+    scene.render.ffmpeg.ffmpeg_preset = "GOOD"
+    scene.render.fps = fps
+    scene.frame_start = 1
+    scene.frame_end = n_frames
+    scene.render.filepath = mp4_path
 
-    frames_dir = output_dir / f"{base_name}_frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
+    # Reconstruct the same target used in setup_camera
+    d = 1.016  # cover depth in metres (COVER_DEPTH_MM * MM)
+    target = Vector((0.0, -d * 0.25, 0.5))
 
-    radius = math.sqrt(cam_start_x**2 + cam_start_y**2)
-    target = Vector((0.0, 0.0, cam_start_z * 0.6))   # same look-at as still
+    # Camera orbit: pivot around target point, maintaining constant Z height
+    # and constant radius from target in the XY plane
+    cam_loc = cam_obj.location.copy()
+    # Offset from target to camera in XY
+    dx = cam_loc.x - target.x
+    dy = cam_loc.y - target.y
+    radius  = math.sqrt(dx**2 + dy**2)
+    cam_z   = cam_loc.z
+    start_angle = math.atan2(dy, dx)
+    # End position: mirror start across the YZ plane (X=0), i.e. negate X offset.
+    # This sweeps from front-right to front-left across the symmetry axis,
+    # which is less than 180° if the camera isn't exactly at 45°.
+    end_dx = -dx   # mirror X, keep Y
+    end_dy =  dy
+    end_angle = math.atan2(end_dy, end_dx)
+    # Ensure we sweep the short way (through the front, not the back)
+    delta = end_angle - start_angle
+    if delta > 0:
+        delta -= 2 * math.pi
+    # delta is now negative (clockwise). If magnitude > pi, go the other way.
+    if abs(delta) > math.pi:
+        delta += 2 * math.pi
 
-    for frame in range(n_frames):
-        t = frame / (n_frames - 1)
-        angle = start_angle + t * (end_angle - start_angle)
-        cam_obj.location.x = radius * math.cos(angle)
-        cam_obj.location.y = radius * math.sin(angle)
-        cam_obj.location.z = cam_start_z
+    for frame in range(1, n_frames + 1):
+        t = (frame - 1) / max(n_frames - 1, 1)
+        angle = start_angle + t * delta
+        cam_obj.location.x = target.x + radius * math.cos(angle)
+        cam_obj.location.y = target.y + radius * math.sin(angle)
+        cam_obj.location.z = cam_z
 
         direction = target - cam_obj.location
         rot_quat  = direction.to_track_quat("-Z", "Y")
         cam_obj.rotation_euler = rot_quat.to_euler()
 
-        frame_path = str(frames_dir / f"frame_{frame:04d}.png")
-        scene.render.filepath = frame_path
-        bpy.ops.render.render(write_still=True)
-        print(f"    Frame {frame+1}/{n_frames} → {frame_path}")
+        cam_obj.keyframe_insert(data_path="location",       frame=frame)
+        cam_obj.keyframe_insert(data_path="rotation_euler", frame=frame)
 
-    # Encode with ffmpeg if available
-    mp4_path = str(output_dir / f"{base_name}.mp4")
-    import shutil as _shutil
-    ffmpeg = _shutil.which("ffmpeg")
-    if ffmpeg:
-        import subprocess as _sp
-        _sp.run([
-            ffmpeg, "-y",
-            "-framerate", str(fps),
-            "-i", str(frames_dir / "frame_%04d.png"),
-            "-c:v", "libx264",
-            "-preset", "slow",
-            "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            mp4_path
-        ], check=False)
-        print(f"    Video: {mp4_path}")
-    else:
-        print(f"    ffmpeg not found — frames saved to {frames_dir}")
-        print(f"    To encode manually: ffmpeg -framerate {fps} -i {frames_dir}/frame_%04d.png -c:v libx264 -crf 18 {mp4_path}")
+    # Linear interpolation — constant speed, no ease-in/out
+    for fcurve in cam_obj.animation_data.action.fcurves:
+        for kp in fcurve.keyframe_points:
+            kp.interpolation = "LINEAR"
 
+    print(f"    Rendering {n_frames} frames → {mp4_path}")
+    bpy.ops.render.render(animation=True)
+    print(f"    Video complete: {mp4_path}")
     return mp4_path
 
 
@@ -639,6 +694,10 @@ def main():
     if not designs:
         print("No designs in manifest.")
         sys.exit(0)
+
+    if args.top_n is not None:
+        designs = designs[:args.top_n]
+        print(f"  Rendering top {args.top_n} design(s) from manifest")
 
     # Resolve output dir: absolute paths used as-is, relative paths resolved
     # relative to the script location (i.e. your project directory), not the manifest.
@@ -665,6 +724,19 @@ def main():
     # We use known project constants as fallback
     COVER_WIDTH_MM = 1576.0
     COVER_DEPTH_MM = 1016.0
+
+    # ── Build design list — override with --obj if specified ─────────────────
+    if args.obj:
+        obj_path = Path(args.obj)
+        if not obj_path.is_absolute():
+            obj_path = (Path(os.path.dirname(os.path.abspath(__file__))) / obj_path).resolve()
+        designs = [{
+            "rank": 1,
+            "obj_file": str(obj_path),
+            "deflection_mm": 0.0,
+            "pct_above_best": 0.0,
+        }]
+        print(f"  Using single OBJ: {obj_path}")
 
     # ── Render each design ────────────────────────────────────────────────────
     for design in designs:
